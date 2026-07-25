@@ -39,6 +39,8 @@ pub fn decode(link: LinkType, data: &[u8]) -> Option<Decoded> {
     let sliced = match link {
         LinkType::Ethernet => SlicedPacket::from_ethernet(data).ok()?,
         LinkType::RawIp => SlicedPacket::from_ip(data).ok()?,
+        // BSD loopback: 4-byte address-family header, then the IP packet.
+        LinkType::Null => SlicedPacket::from_ip(data.get(4..)?).ok()?,
         // Linux cooked / pktap are unwrapped by their backends before reaching here.
         LinkType::LinuxSll | LinkType::Pktap => return None,
     };
@@ -52,22 +54,36 @@ pub fn decode(link: LinkType, data: &[u8]) -> Option<Decoded> {
             IpAddr::V6(v6.header().destination_addr()),
         ),
     };
-    let tcp = match sliced.transport.as_ref()? {
-        TransportSlice::Tcp(t) => t,
+    // TCP carries the TLS streams we parse; UDP (QUIC/HTTP-3, DNS) can't be
+    // stream-reassembled here, but we still surface its destinations and byte
+    // counts — otherwise a QUIC-heavy app (e.g. a browser talking to Google
+    // over HTTP/3) looks like it produced no traffic at all.
+    let (proto, src_port, dst_port, payload) = match sliced.transport.as_ref()? {
+        TransportSlice::Tcp(t) => (
+            L4Proto::Tcp,
+            t.source_port(),
+            t.destination_port(),
+            t.payload().to_vec(),
+        ),
+        TransportSlice::Udp(u) => (
+            L4Proto::Udp,
+            u.source_port(),
+            u.destination_port(),
+            u.payload().to_vec(),
+        ),
         _ => return None,
     };
-    let src = SocketAddr::new(src_ip, tcp.source_port());
-    let dst = SocketAddr::new(dst_ip, tcp.destination_port());
-    let payload = tcp.payload().to_vec();
     if payload.is_empty() {
         return None;
     }
+    let src = SocketAddr::new(src_ip, src_port);
+    let dst = SocketAddr::new(dst_ip, dst_port);
     let (local, remote, outbound) = classify(src, dst);
     Some(Decoded {
         local,
         remote,
         outbound,
-        proto: L4Proto::Tcp,
+        proto,
         payload,
     })
 }

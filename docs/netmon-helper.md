@@ -53,46 +53,74 @@ Achilles.app (user)                     achilles-netmon-helper (root LaunchDaemo
 - **Notarization** already runs in `publish.yml`; the embedded helper +
   LaunchDaemon are covered because they're inside the bundle at sign time.
 
-## Auto-install (the remaining step — needs a signed build to validate)
+## Auto-install (wired — needs a signed build to validate end-to-end)
 
-Add a small macOS module that registers the daemon via `SMAppService` and drives
-the one-time user approval. Recommended crates (macOS target only):
-`objc2`, `objc2-foundation`, `objc2-service-management`.
+`src-tauri/src/helper_mac.rs` (macOS only, via `objc2`, `objc2-foundation`,
+`objc2-service-management`) wraps `SMAppService` for the daemon plist and is
+exposed as three Tauri commands in `commands.rs`:
 
-```rust
-// src-tauri/src/helper_mac.rs   (#[cfg(target_os = "macos")])
-use objc2_foundation::NSString;
-use objc2_service_management::{SMAppService, SMAppServiceStatus};
+| command | does |
+| --- | --- |
+| `helper_status` | returns `{ status, socketReady }` — `status` is the `SMAppService` state (`enabled` / `requiresApproval` / `notRegistered` / `notFound` / `unknown`, `unsupported` off-macOS), `socketReady` is `netmon::helper_reachable()` |
+| `helper_install` | `register()`s the daemon; idempotent (no-op when already `enabled`) |
+| `helper_uninstall` | `unregister()`s the daemon (status → `notRegistered`); idempotent, and makes the install/approval flow re-testable |
+| `helper_open_settings` | `openSystemSettingsLoginItems()` for the approval step |
 
-const PLIST: &str = "dev.crabnebula.achilles.netmon.plist";
+`socketReady` **probes connectability** (`UnixStream::connect`), not socket-file
+presence: a Unix-socket file outlives its listener, so a stopped/unregistered
+daemon leaves a root-owned socket in `/var/run` that the user-level app can't
+delete — an `exists()` check would keep reporting it "ready" until the next
+reboot. The helper also removes its own socket on `SIGTERM` for good measure.
 
-pub fn service() -> objc2::rc::Retained<SMAppService> {
-    let name = NSString::from_str(PLIST);
-    unsafe { SMAppService::daemonServiceWithPlistName(&name) }
-}
+Both signals matter: `status` flips to `enabled` the moment the user approves,
+but the socket — the thing a capture actually needs — appears once launchd has
+started the daemon. The UI keys its banner on `socketReady`, falling back to
+`status` to decide *which* prompt to show.
 
-/// Register the daemon. First call → status becomes `RequiresApproval`; the user
-/// enables it in System Settings → General → Login Items & Extensions.
-pub fn install() -> Result<(), String> {
-    unsafe { service().registerAndReturnError() }.map_err(|e| e.localizedDescription().to_string())
-}
+**When registration happens**
 
-pub fn status() -> SMAppServiceStatus { unsafe { service().status() } }
+- **On pressing Record** (`ensureHelperForRecording` in `ui/main.js`) — the
+  moment privileges actually matter. If the socket is down and the daemon isn't
+  registered yet, it registers right there. This never blocks the capture: the
+  first registration only parks the daemon in System Settings awaiting approval,
+  so recording proceeds on the pcap fallback meanwhile.
+- **On launch, re-validation only** (`helper_mac::revalidate_on_launch()` from
+  the `setup` hook) — re-`register()`s when status is already `enabled`, so an
+  in-place updater swap of the bundled helper keeps working. Same-Team signature
+  → no re-approval. It deliberately does **not** register from scratch: merely
+  launching Achilles should never plant a root daemon.
+- **On demand**, from the banner's "Install capture helper" button.
 
-pub fn open_login_items() {
-    unsafe { SMAppService::openSystemSettingsLoginItems() };
-}
-```
+**Banner states** (`helperBanner()`, shown in the idle, process-picker, and
+recording views so it stays visible exactly while it's actionable):
 
-Wire as Tauri commands (`helper_status`, `helper_install`, `helper_open_settings`)
-and call `install()` on first launch / when the user clicks **Record** and the
-socket is absent. UX: if `status()` is `RequiresApproval`, show a banner —
-"Achilles needs a one-time approval to capture traffic" — with a button that
-calls `open_login_items()`. Once enabled, launchd starts the daemon as root, the
-socket appears, and `default_source()` transparently switches to `HelperSource`.
+| state | banner |
+| --- | --- |
+| `socketReady` | none — helper is serving |
+| `enabled`, no socket | "approved — waiting for it to start…" + *Check again* |
+| `requiresApproval` | "approve it in System Settings…" + *Open Settings* / *Check again* |
+| otherwise | "install the privileged helper…" + *Install capture helper* |
 
-On update, call `install()` again on launch to re-validate (same-Team signature
-→ no re-approval in the normal case). No workflow-secret changes are required.
+Approval happens outside the app and emits no event, hence the explicit *Check
+again* button; `startRecording` also re-checks on every attempt. Once enabled,
+launchd starts the daemon as root, the socket appears, and `default_source()`
+transparently switches to `HelperSource`. No workflow-secret changes are
+required.
+
+Still unvalidated: the approval flow only exercises from a **signed `.app`** —
+`SMAppService` validates that the app and the embedded helper carry a valid
+signature under the same Team ID, so ad-hoc/unsigned won't register. Notarization
+is *not* part of that check; a locally `cargo tauri build`-ed bundle signed with
+`APPLE_SIGNING_IDENTITY` is enough to test. Under `cargo tauri dev` there's no
+bundle at all, so `status` reports `notFound` and the UI degrades to the
+host-wide fallback with a notice.
+
+Notarization still matters for anything distributed: Gatekeeper blocks an
+unnotarized download outright, and a quarantined app runs translocated from a
+randomized read-only path — which breaks the bundle-relative `BundleProgram` a
+registration points at. Test from `/Applications`, and strip quarantine
+(`xattr -dr com.apple.quarantine`) from any bundle that round-tripped through a
+download.
 
 ## Security notes
 

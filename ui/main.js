@@ -456,6 +456,15 @@ async function openDetail(det) {
   currentDetail = det;
   detailName.textContent = det.display_name || det.bundle_id || det.path;
 
+  // A helper approval left pending from an earlier visit resolves outside the
+  // app; refresh and, if it's still outstanding, poll so the banner self-updates.
+  void refreshHelperStatus().then(() => {
+    if (currentDetail?.path === det.path) {
+      syncHelperPolling(det);
+      refreshCrypto(det);
+    }
+  });
+
   // Inspect the app's binary headers (fast; auto-loads into its section).
   loadBinMeta(det);
 
@@ -1202,25 +1211,108 @@ invoke("netmon_capture_available")
   })
   .catch(() => {});
 
-// Privileged-helper (macOS) registration status, for the install banner.
-let helperStatus = null;
+// Privileged-helper (macOS) state, for the install/approval banner:
+// `{ status, socketReady }`. Registration status alone isn't enough — it reads
+// "enabled" from the moment the user approves, while the daemon's socket (the
+// thing a capture actually needs) appears a moment later.
+let helperState = null;
+// Transient guidance shown in the banner while an install/approval is in flight
+// (e.g. "macOS is asking you to approve…"); cleared once the socket is live.
+let helperMsg = null;
+const helperSocketReady = () => helperState?.socketReady === true;
+const helperSupported = () => helperState != null && helperState.status !== "unsupported";
+// An install/approval is outstanding: registered but the socket isn't up yet,
+// so the resolution is pending the user's action outside the app.
+const helperPending = () =>
+  cryptoCaptureAvailable &&
+  helperSupported() &&
+  !helperSocketReady() &&
+  (helperState.status === "requiresApproval" || helperState.status === "enabled");
+
 async function refreshHelperStatus() {
   try {
-    helperStatus = await invoke("helper_status");
+    helperState = await invoke("helper_status");
   } catch {
-    helperStatus = null;
+    helperState = null;
   }
+  if (helperSocketReady()) helperMsg = null; // resolved — drop stale guidance
 }
 void refreshHelperStatus();
 
+// Approving the helper happens outside the app (the macOS prompt, then System
+// Settings) with no callback to us, so poll until the socket goes live — then
+// the banner clears itself with no button to press. Self-stops when the pane
+// closes or nothing is pending, and clears the stale first-call error.
+let helperPollTimer = null;
+function stopHelperPolling() {
+  if (helperPollTimer !== null) {
+    clearInterval(helperPollTimer);
+    helperPollTimer = null;
+  }
+}
+function startHelperPolling(det) {
+  stopHelperPolling();
+  helperPollTimer = setInterval(async () => {
+    if (currentDetail?.path !== det.path) {
+      stopHelperPolling();
+      return;
+    }
+    await refreshHelperStatus();
+    if (helperSocketReady()) {
+      // Registration's first call often rejects with "Operation not permitted"
+      // even though the prompt appeared and approval then succeeded; that stale
+      // error must not outlive the now-working helper.
+      cryptoFor(det.path).error = null;
+      stopHelperPolling();
+    } else if (!helperPending()) {
+      stopHelperPolling();
+    }
+    refreshCrypto(det);
+  }, 1500);
+}
+// Keep a poller alive for exactly as long as an approval is outstanding.
+function syncHelperPolling(det) {
+  if (helperPending()) startHelperPolling(det);
+  else stopHelperPolling();
+}
+
 function helperBanner() {
-  if (!cryptoCaptureAvailable || helperStatus === "enabled" || helperStatus === "unsupported") {
-    return "";
+  // Nothing to offer when capture is unavailable, the platform has no helper,
+  // or the daemon is already up and serving.
+  if (!cryptoCaptureAvailable || !helperSupported() || helperSocketReady()) return "";
+
+  const msg = helperMsg ? `<p class="muted">${escapeHtml(helperMsg)}</p>` : "";
+  const remove = `<button type="button" data-crypto="uninstall-helper" title="unregister the helper">Remove</button>`;
+  if (helperState.status === "enabled") {
+    // Approved, but launchd hasn't brought the socket up yet — polling will
+    // clear this on its own once it starts.
+    return `${msg}<p class="muted">Capture helper approved — waiting for it to start… ${remove}</p>`;
   }
-  if (helperStatus === "requiresApproval") {
-    return `<p class="warn">Capture helper installed — <strong>approve it</strong> in System Settings to enable no-sudo per-app capture. <button type="button" data-crypto="open-helper-settings">Open Settings</button></p>`;
+  if (helperState.status === "requiresApproval") {
+    return `${msg}<p class="warn">Capture helper installed — <strong>approve it</strong> in System Settings → General → Login Items &amp; Extensions to enable no-sudo per-app capture. <button type="button" data-crypto="open-helper-settings">Open Settings</button> ${remove}</p>`;
   }
-  return `<p class="muted">Tip: install the privileged helper for no-sudo, per-app capture. <button type="button" data-crypto="install-helper">Install capture helper</button></p>`;
+  return `${msg}<p class="muted">Tip: install the privileged helper for no-sudo, per-app capture. <button type="button" data-crypto="install-helper">Install capture helper</button></p>`;
+}
+
+// Shown in the idle picker while the helper is live (the banner is empty then),
+// so a working helper can still be removed — a clean reset for re-testing the
+// install flow, and a way for a user to uninstall it. Phrased as a forward-
+// looking capability ("will use"), not a claim about a past capture.
+function helperActiveControl() {
+  if (!cryptoCaptureAvailable || !helperSocketReady()) return "";
+  return `<p class="muted">Capture helper active — recordings will use per-app attribution. <button type="button" data-crypto="uninstall-helper">Remove</button></p>`;
+}
+
+// How the finished session's traffic was actually captured, from the report's
+// backend id — so the result is unambiguous about whether it was per-app or a
+// host-wide fallback, independent of the helper's current status.
+function captureModeLine(report) {
+  const mode = {
+    "macos-helper": ["ok", "per-app via privileged helper"],
+    "macos-pktap": ["ok", "per-app (pktap)"],
+    pcap: ["warn", "host-wide — no per-app filter"],
+  }[report?.backendId];
+  return mode ? `<p class="muted">Captured: <span class="${mode[0]}">${mode[1]}</span>.</p>` : "";
 }
 
 const cryptoState = new Map();
@@ -1248,37 +1340,89 @@ function renderCrypto(det) {
   return `<h3>Cryptography</h3><div id="crypto-section">${renderCryptoInner(det, cryptoFor(det.path))}</div>`;
 }
 
-function renderCryptoInner(det, st) {
+// The live counter summary shown next to the Stop button during a recording.
+function seenText(st) {
+  const c = st.counters || {};
+  return c.bytes
+    ? `${fmtBytes(c.bytes)} captured · ${c.flows || 0} destination(s) · ${c.handshakes || 0} handshake(s)`
+    : "waiting for the first packet…";
+}
+
+// Destinations table + observed TLS handshakes, from the live-accumulated
+// session state (kept after stop). Shared by the recording view and the
+// post-stop summary.
+function captureTablesHtml(st) {
+  const rows = [...st.dests.values()]
+    .map(
+      (d) =>
+        `<tr><td>${escapeHtml(d.hostname || d.sni || d.remoteIp)}</td><td>${d.port}</td><td class="muted">${escapeHtml(d.sni || "—")}</td></tr>`,
+    )
+    .join("");
+  const hs = st.handshakes
+    .map(
+      (h) =>
+        `<div class="advisory"><code>${escapeHtml(h.destination)}</code> ${escapeHtml(
+          h.negotiatedVersion ? "TLS " + h.negotiatedVersion : (h.offeredVersions || []).map((v) => "TLS " + v).join("/") || "TLS",
+        )}${h.cipherSuiteSelected != null ? " · " + cipherName(h.cipherSuiteSelected) : ""}${
+          h.ja3 ? ` · <span class="muted">ja3 ${escapeHtml(h.ja3.slice(0, 12))}</span>` : ""
+        }</div>`,
+    )
+    .join("");
+  const table = rows
+    ? `<table class="crypto-dests"><thead><tr><th>host</th><th>port</th><th>sni</th></tr></thead><tbody>${rows}</tbody></table>`
+    : "";
+  return { table, hs };
+}
+
+// The frequently-changing part of the recording view (notices, destinations,
+// handshakes). Lives inside `#crypto-live` and is the ONLY thing refreshed on
+// each heartbeat — so the Stop button (outside it) is never destroyed under a
+// click. See refreshCrypto.
+function renderRecordingLive(st) {
   const err = st.error ? `<p class="bad">${escapeHtml(st.error)}</p>` : "";
   const notice = st.notice ? `<p class="warn">${escapeHtml(st.notice)}</p>` : "";
+  const { table, hs } = captureTablesHtml(st);
+  return `${err}${notice}${helperBanner()}
+    ${table || `<p class="muted">waiting for connections…</p>`}
+    ${hs}`;
+}
 
-  if (st.status === "recording") {
-    const c = st.counters || {};
-    const dests = [...st.dests.values()]
-      .map(
-        (d) =>
-          `<tr><td>${escapeHtml(d.hostname || d.sni || d.remoteIp)}</td><td>${d.port}</td><td class="muted">${escapeHtml(d.sni || "—")}</td></tr>`,
-      )
-      .join("");
-    const hs = st.handshakes
-      .map(
-        (h) =>
-          `<div class="advisory"><code>${escapeHtml(h.destination)}</code> ${escapeHtml(
-            h.negotiatedVersion ? "TLS " + h.negotiatedVersion : (h.offeredVersions || []).map((v) => "TLS " + v).join("/") || "TLS",
-          )}${h.cipherSuiteSelected != null ? " · " + cipherName(h.cipherSuiteSelected) : ""}${
-            h.ja3 ? ` · <span class="muted">ja3 ${escapeHtml(h.ja3.slice(0, 12))}</span>` : ""
-          }</div>`,
-      )
-      .join("");
-    const seen = c.bytes
-      ? `${fmtBytes(c.bytes)} captured · ${c.flows || 0} destination(s) · ${c.handshakes || 0} handshake(s)`
-      : "waiting for the first packet…";
-    return `${err}${notice}<p class="warn">● recording — ${seen}. Use the app to generate traffic. <button type="button" data-crypto="stop">Stop &amp; build CBOM</button></p>
-      ${dests ? `<table class="crypto-dests"><thead><tr><th>host</th><th>port</th><th>sni</th></tr></thead><tbody>${dests}</tbody></table>` : `<p class="muted">waiting for connections…</p>`}
-      ${hs}`;
+// Post-stop summary of a recording: what was captured (routes + observed TLS).
+// Stop just stops — the CBOM (runtime handshakes + static analysis) is built by
+// the Export button, not automatically here.
+function renderCaptureDone(st) {
+  const report = st.result?.report || {};
+  const nd = (report.destinations || []).length;
+  const nh = (report.handshakes || []).length;
+  const { table, hs } = captureTablesHtml(st);
+  const note = nh
+    ? "Observed handshakes are included when you export the CBOM."
+    : "No TLS handshakes captured — reused or QUIC connections appear as destinations only. Export still builds a CBOM from static binary analysis.";
+  return `${captureModeLine(report)}<p class="muted">Recording stopped — ${nd} destination(s), ${nh} handshake(s) observed. ${note}</p>
+    ${table || `<p class="muted">No destinations recorded.</p>`}
+    ${hs}
+    <p><button type="button" data-crypto="export">Export CBOM</button>
+      <button type="button" data-crypto="reset">New recording</button></p>`;
+}
+
+function renderCryptoInner(det, st) {
+  const err = st.error ? `<p class="bad">${escapeHtml(st.error)}</p>` : "";
+
+  if (st.status === "recording" || st.status === "stopping") {
+    const stopping = st.status === "stopping";
+    // Button and status line sit OUTSIDE #crypto-live so heartbeat refreshes
+    // don't rebuild (and thus swallow clicks on) the Stop button.
+    const button = stopping
+      ? `<button type="button" disabled>Stopping…</button>`
+      : `<button type="button" data-crypto="stop">Stop</button>`;
+    return `<p class="warn">● ${stopping ? "stopping…" : "recording"} — <span id="crypto-seen">${seenText(st)}</span>.${stopping ? "" : " Use the app to generate traffic."} ${button}</p>
+      <div id="crypto-live">${renderRecordingLive(st)}</div>`;
   }
 
   if (st.status === "done" && st.result) {
+    // A recording → show what was captured (routes + handshakes); the CBOM is
+    // exported on demand. A static-only scan (no report) → show the CBOM itself.
+    if (st.result.report) return renderCaptureDone(st);
     return (
       renderCbom(st.result) +
       `<p><button type="button" data-crypto="export">Export CBOM (CycloneDX)</button>
@@ -1287,14 +1431,14 @@ function renderCryptoInner(det, st) {
   }
 
   // idle
-  const staticBtn = `<p class="muted"><button type="button" data-crypto="static-scan">Inventory crypto from binaries (no capture)</button> — reads linked crypto libraries &amp; algorithm symbols; no privileges needed.</p>`;
+  const staticBtn = `<p class="muted"><button type="button" data-crypto="static-scan">Inventory crypto from binaries (no capture)</button> <button type="button" data-crypto="export">Export CBOM</button> — reads linked crypto libraries &amp; algorithm symbols; no privileges needed. Export builds a static CBOM if you haven't recorded.</p>`;
   const noticeP = st.notice ? `<p class="muted">${escapeHtml(st.notice)}</p>` : "";
   if (!cryptoCaptureAvailable) {
     return `${err}${noticeP}<p class="muted">Live traffic capture isn't available on this platform. You can still inventory cryptography from the app's binaries.</p>${staticBtn}`;
   }
   const procs = st.processes;
   if (!procs) {
-    return `${err}${noticeP}${helperBanner()}<p class="muted">Record the selected running process's TLS traffic to inventory its cryptography (algorithms, protocols, key exchange, certificates) and destinations, then export a CycloneDX CBOM. Requires capture privileges.</p>
+    return `${err}${noticeP}${helperBanner()}${helperActiveControl()}<p class="muted">Record the selected running process's TLS traffic to inventory its cryptography (algorithms, protocols, key exchange, certificates) and destinations, then export a CycloneDX CBOM. Requires capture privileges.</p>
       <p><button type="button" data-crypto="load-procs">Choose a running process…</button></p>
       ${staticBtn}`;
   }
@@ -1304,7 +1448,7 @@ function renderCryptoInner(det, st) {
         `<option value="${p.pid}"${st.pid === p.pid ? " selected" : ""}>${escapeHtml(p.name)} (pid ${p.pid})</option>`,
     )
     .join("");
-  return `${err}${noticeP}<p><select data-crypto="pick"><option value="">— choose a running process —</option>${options}</select>
+  return `${err}${noticeP}${helperBanner()}${helperActiveControl()}<p><select data-crypto="pick"><option value="">— choose a running process —</option>${options}</select>
       <button type="button" data-crypto="record"${st.pid ? "" : " disabled"}>Record</button>
       <button type="button" data-crypto="refresh-procs" title="reload process list">↻</button></p>
       ${staticBtn}`;
@@ -1348,8 +1492,20 @@ function renderCbom(result) {
 
 function refreshCrypto(det) {
   if (currentDetail?.path !== det.path) return;
+  const st = cryptoFor(det.path);
+  // While recording, patch only the live stats in place — never rebuild the
+  // whole section, or the Stop button would be replaced under the user's click
+  // (making it take several tries to register). Full render for every other
+  // state, including the one-time transition into "stopping".
+  const live = document.querySelector("#crypto-live");
+  if (st.status === "recording" && live) {
+    const seen = document.querySelector("#crypto-seen");
+    if (seen) seen.textContent = seenText(st);
+    live.innerHTML = renderRecordingLive(st);
+    return;
+  }
   const el = document.querySelector("#crypto-section");
-  if (el) el.innerHTML = renderCryptoInner(det, cryptoFor(det.path));
+  if (el) el.innerHTML = renderCryptoInner(det, st);
 }
 
 function guessProcess(procs, det) {
@@ -1363,6 +1519,31 @@ function guessProcess(procs, det) {
   );
 }
 
+// Pressing Record is the moment per-app capture privileges actually matter, so
+// register the helper here if it isn't up yet. First registration only puts the
+// daemon in System Settings awaiting the user's approval — so we never block on
+// it: the pcap fallback still records (host-wide) for this session, and the
+// banner stays visible with the approval CTA (per-app kicks in next Record).
+async function ensureHelperForRecording(st, det) {
+  await refreshHelperStatus();
+  if (!helperSupported() || helperSocketReady()) return;
+  if (helperState.status !== "requiresApproval") {
+    // Not yet registered — kick off registration (this pops the macOS prompt).
+    // A first-call rejection is expected; the refreshed status is the truth.
+    try {
+      await invoke("helper_install");
+    } catch {
+      /* benign first-call rejection */
+    }
+    await refreshHelperStatus();
+  }
+  if (helperPending()) {
+    helperMsg =
+      "macOS is asking you to approve the capture helper. Recording host-wide meanwhile — approve it, then stop and Record again for per-app capture.";
+    startHelperPolling(det);
+  }
+}
+
 async function startRecording(det, st) {
   st.status = "recording";
   st.error = null;
@@ -1371,6 +1552,9 @@ async function startRecording(det, st) {
   st.handshakes = [];
   st.counters = null;
   st.result = null;
+  refreshCrypto(det);
+
+  await ensureHelperForRecording(st, det);
   refreshCrypto(det);
 
   const channel = new Channel();
@@ -1419,6 +1603,14 @@ async function startRecording(det, st) {
 }
 
 async function stopRecording(det, st) {
+  // Guard against re-entry: only a live recording can be stopped. Setting
+  // "stopping" synchronously means any follow-up clicks (or a late one that
+  // slipped through) are ignored instead of calling netmon_stop again — a
+  // second call hits "no capture is running" and would wipe the CBOM result.
+  if (st.status !== "recording") return;
+  st.status = "stopping";
+  refreshCrypto(det); // disables the button while the stop completes
+
   try {
     st.result = await invoke("netmon_stop");
     st.status = "done";
@@ -1428,6 +1620,36 @@ async function stopRecording(det, st) {
   }
   st.channel = null;
   refreshCrypto(det);
+}
+
+// Export the CBOM, building it from static binary analysis first if nothing has
+// been recorded/scanned yet — so Export works from the idle view without a
+// recording (the CBOM is fundamentally a static artifact; a recording only adds
+// runtime evidence).
+async function ensureAndExportCbom(det, st) {
+  if (!st.result?.inventory) {
+    st.error = null;
+    st.notice = "building CBOM from binaries…";
+    refreshCrypto(det);
+    try {
+      const inv = await invoke("crypto_inventory", {
+        path: det.path,
+        executable: det.executable ?? null,
+        displayName: det.display_name ?? null,
+        bundleId: det.bundle_id ?? null,
+      });
+      st.result = { inventory: inv };
+      st.status = "done"; // surface the CBOM alongside the save dialog
+      st.notice = null;
+    } catch (err) {
+      st.error = String(err);
+      st.notice = null;
+      refreshCrypto(det);
+      return;
+    }
+    refreshCrypto(det);
+  }
+  await exportCbom(det, st);
 }
 
 async function exportCbom(det, st) {
@@ -1708,7 +1930,7 @@ detailBody.addEventListener("click", (e) => {
   } else if (action === "stop") {
     void stopRecording(det, st);
   } else if (action === "export") {
-    void exportCbom(det, st);
+    void ensureAndExportCbom(det, st);
   } else if (action === "static-scan") {
     st.error = null;
     st.notice = "scanning binaries…";
@@ -1730,13 +1952,43 @@ detailBody.addEventListener("click", (e) => {
       })
       .finally(() => refreshCrypto(det));
   } else if (action === "install-helper") {
+    st.error = null;
+    helperMsg = "macOS will ask you to approve the capture helper — confirm the prompt, then enable it in System Settings if asked.";
+    refreshCrypto(det);
     invoke("helper_install")
+      // A first-call rejection ("Operation not permitted") is expected here —
+      // the approval prompt still appears — so let the refreshed status be the
+      // source of truth rather than surfacing it as an error.
+      .catch(() => {})
+      .finally(() =>
+        refreshHelperStatus().then(() => {
+          if (helperPending()) {
+            // Registration took; wait for the user to approve.
+            startHelperPolling(det);
+          } else if (!helperSocketReady()) {
+            // Genuinely didn't register (not just awaiting approval).
+            helperMsg = null;
+            st.error = "Could not install the capture helper. You can still record host-wide, or run Achilles with sudo for per-app capture.";
+          }
+          refreshCrypto(det);
+        }),
+      );
+  } else if (action === "open-helper-settings") {
+    void invoke("helper_open_settings").catch(() => {});
+  } else if (action === "uninstall-helper") {
+    st.error = null;
+    helperMsg = null;
+    stopHelperPolling();
+    invoke("helper_uninstall")
       .catch((err) => {
         st.error = String(err);
       })
-      .finally(() => refreshHelperStatus().then(() => refreshCrypto(det)));
-  } else if (action === "open-helper-settings") {
-    void invoke("helper_open_settings").catch(() => {});
+      .finally(() =>
+        refreshHelperStatus().then(() => {
+          syncHelperPolling(det);
+          refreshCrypto(det);
+        }),
+      );
   } else if (action === "reset") {
     st.status = "idle";
     st.result = null;
@@ -1757,6 +2009,7 @@ detailBody.addEventListener("change", (e) => {
 closeDetailBtn.addEventListener("click", () => {
   detailPanel.hidden = true;
   currentDetail = null;
+  stopHelperPolling();
   document
     .querySelectorAll("#apps tbody tr.selected")
     .forEach((r) => r.classList.remove("selected"));
@@ -1880,6 +2133,8 @@ rescanBtn.addEventListener("click", () => {
   detailCache.clear();
   tbody.replaceChildren();
   detailPanel.hidden = true;
+  currentDetail = null;
+  stopHelperPolling();
   startScan();
 });
 

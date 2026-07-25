@@ -25,10 +25,13 @@ const HAS_CAPTURE: bool = false;
 /// when built without `capture` or on an unsupported OS.
 pub fn default_source() -> Result<Box<dyn CaptureSource>, CaptureError> {
     // macOS: prefer the privileged helper (root, per-app attribution, no sudo)
-    // when its socket is present; otherwise fall back to direct pcap.
+    // when it's actually reachable; otherwise fall back to direct pcap. Probing
+    // connectability (not mere socket-file presence) matters — a dead helper
+    // leaves its socket file behind, and connecting to that would fail the whole
+    // capture instead of falling back here.
     #[cfg(target_os = "macos")]
     {
-        if std::path::Path::new(crate::wire::HELPER_SOCKET_PATH).exists() {
+        if helper_reachable() {
             Ok(Box::new(helper::HelperSource))
         } else {
             Ok(Box::new(pcap_backend::PcapSource::new()))
@@ -54,12 +57,19 @@ pub fn capture_available() -> bool {
     HAS_CAPTURE
 }
 
-/// Whether the privileged helper's socket is present (macOS). The app uses this
-/// to decide whether to offer helper install/approval.
-pub fn helper_installed() -> bool {
+/// Whether the privileged helper is actually reachable — the daemon is alive and
+/// listening, not merely that a socket file exists. The app uses this to decide
+/// whether the helper is serving vs. offering install/approval.
+///
+/// A Unix-socket file lingers on disk after its listener dies, so an
+/// `exists()` check reports a dead helper as present — which is exactly what
+/// made an unregistered helper keep showing as "active". Probe by connecting: a
+/// live listener accepts instantly, a stale or absent socket fails at once
+/// (`ECONNREFUSED` / `ENOENT`), so no timeout is needed.
+pub fn helper_reachable() -> bool {
     #[cfg(target_os = "macos")]
     {
-        std::path::Path::new(crate::wire::HELPER_SOCKET_PATH).exists()
+        std::os::unix::net::UnixStream::connect(crate::wire::HELPER_SOCKET_PATH).is_ok()
     }
     #[cfg(not(target_os = "macos"))]
     {

@@ -15,7 +15,7 @@ pub mod model;
 pub mod source;
 pub mod wire;
 
-pub use backends::{capture_available, default_source, helper_installed, list_processes};
+pub use backends::{capture_available, default_source, helper_reachable, list_processes};
 #[cfg(target_os = "macos")]
 pub use backends::direct_capture_source;
 pub use engine::Session;

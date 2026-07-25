@@ -29,12 +29,26 @@ async fn main() {
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666));
     eprintln!("achilles-netmon-helper: listening on {path}");
 
+    // launchd stops us with SIGTERM (on unregister / logout / shutdown). Remove
+    // the socket on the way out: a Unix-socket file outlives its process, and a
+    // leftover one is root-owned in /var/run where the user-level app can't
+    // delete it — so its mere presence would otherwise make a stopped helper
+    // look installed until the next reboot clears /var/run.
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("install SIGTERM handler");
+
     loop {
-        match listener.accept().await {
-            Ok((stream, _)) => {
-                tokio::spawn(serve(stream));
+        tokio::select! {
+            accepted = listener.accept() => match accepted {
+                Ok((stream, _)) => {
+                    tokio::spawn(serve(stream));
+                }
+                Err(e) => eprintln!("achilles-netmon-helper: accept: {e}"),
+            },
+            _ = term.recv() => {
+                let _ = std::fs::remove_file(path);
+                break;
             }
-            Err(e) => eprintln!("achilles-netmon-helper: accept: {e}"),
         }
     }
 }

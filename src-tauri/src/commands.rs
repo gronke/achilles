@@ -291,6 +291,22 @@ pub async fn netmon_start(
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let session_id = uuid::Uuid::new_v4().to_string();
+
+    // Start the static binary crypto scan now — it's independent of the capture,
+    // so running it concurrently with the recording means it's already done when
+    // the user stops, keeping Stop fast rather than blocking on a large bundle's
+    // scan. Falls back to the bundle path when no executable is resolved,
+    // mirroring the standalone static scan.
+    let scan_exe = exe_path.clone().or_else(|| app_path.clone());
+    let scan_root = app_path.clone().or_else(|| exe_path.clone());
+    let static_scan = tokio::task::spawn_blocking(move || match scan_exe {
+        Some(exe) => cbom::static_evidence(
+            std::path::Path::new(&exe),
+            scan_root.as_deref().map(std::path::Path::new),
+        ),
+        None => Vec::new(),
+    });
+
     let target = netmon::TargetProcess {
         pid,
         exe_path,
@@ -340,6 +356,7 @@ pub async fn netmon_start(
         app_path,
         handle,
         join,
+        static_scan,
     });
     Ok(meta)
 }
@@ -352,20 +369,30 @@ pub async fn netmon_stop(
 ) -> Result<CbomResult, String> {
     let active = state.0.lock().await.take().ok_or("no capture is running")?;
     active.handle.stop();
-    let (report, mut evidence) = active.join.await.map_err(|e| e.to_string())?;
+    // Bounded wait: the capture loop should wind down promptly once stopped, but
+    // never let a wedged backend hang the UI on "Stopping…" forever.
+    let (report, mut evidence) =
+        match tokio::time::timeout(std::time::Duration::from_secs(5), active.join).await {
+            Ok(joined) => joined.map_err(|e| e.to_string())?,
+            Err(_) => return Err("capture did not stop in time — please try again".into()),
+        };
+
+    // Collect the static binary scan started at capture time (see netmon_start).
+    // It usually finished during the recording, so this is instant; a bound
+    // guards the rare case of a very short recording over a huge bundle, in which
+    // case we ship the runtime-only inventory and the scan's result is dropped.
+    let static_ev = match tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        active.static_scan,
+    )
+    .await
+    {
+        Ok(Ok(ev)) => ev,
+        _ => Vec::new(),
+    };
+    evidence.extend(static_ev);
 
     let target = &active.meta.target;
-    // Merge static binary crypto evidence with the observed (runtime) evidence
-    // so the CBOM covers cryptography the recording didn't exercise.
-    if let Some(exe) = target.exe_path.clone() {
-        let root = active.app_path.clone();
-        let static_ev = tokio::task::spawn_blocking(move || {
-            cbom::static_evidence(std::path::Path::new(&exe), root.as_deref().map(std::path::Path::new))
-        })
-        .await
-        .unwrap_or_default();
-        evidence.extend(static_ev);
-    }
 
     let app_ref = cbom::AppRef {
         name: target.display_name.clone().unwrap_or_else(|| "application".into()),
@@ -649,17 +676,34 @@ pub async fn rust_audit(
 
 // ---------- privileged capture helper (macOS) ------------------------
 
-/// SMAppService registration status: `enabled` | `requiresApproval` |
-/// `notRegistered` | `notFound` | `unknown` | `unsupported`.
+/// Privileged-helper state for the UI's install/approval banner.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HelperState {
+    /// SMAppService registration status: `enabled` | `requiresApproval` |
+    /// `notRegistered` | `notFound` | `unknown` | `unsupported`.
+    pub status: String,
+    /// Whether the daemon's socket is live. `enabled` flips as soon as the user
+    /// approves, but launchd needs a moment more to start the daemon — only
+    /// once this is true does a capture get per-app attribution.
+    pub socket_ready: bool,
+}
+
 #[tauri::command]
-pub async fn helper_status() -> String {
+pub async fn helper_status() -> HelperState {
     #[cfg(target_os = "macos")]
     {
-        crate::helper_mac::status_str().to_string()
+        HelperState {
+            status: crate::helper_mac::status_str().to_string(),
+            socket_ready: crate::helper_mac::socket_ready(),
+        }
     }
     #[cfg(not(target_os = "macos"))]
     {
-        "unsupported".to_string()
+        HelperState {
+            status: "unsupported".to_string(),
+            socket_ready: false,
+        }
     }
 }
 
@@ -669,6 +713,20 @@ pub async fn helper_install() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         crate::helper_mac::install()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("the capture helper is only available on macOS".into())
+    }
+}
+
+/// Unregister the privileged capture helper (status → `notRegistered`). Removes
+/// the helper, and lets the install/approval flow be re-tested from scratch.
+#[tauri::command]
+pub async fn helper_uninstall() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        crate::helper_mac::uninstall()
     }
     #[cfg(not(target_os = "macos"))]
     {

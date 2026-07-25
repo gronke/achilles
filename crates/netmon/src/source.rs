@@ -43,6 +43,9 @@ pub enum LinkType {
     Ethernet,
     RawIp,
     LinuxSll,
+    /// BSD loopback (DLT_NULL / DLT_LOOP): a 4-byte address-family header
+    /// precedes the IP packet. Seen on `lo0` and some `utun`/VPN interfaces.
+    Null,
     /// macOS pktap: a pktap header (with PID) precedes the packet.
     Pktap,
 }

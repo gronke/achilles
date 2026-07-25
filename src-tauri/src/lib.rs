@@ -37,6 +37,10 @@ pub struct ActiveCapture {
     pub handle: netmon::CaptureHandle,
     /// The driver task; yields the final report + crypto evidence on stop.
     pub join: tauri::async_runtime::JoinHandle<(netmon::SessionReport, Vec<cbom::CryptoEvidence>)>,
+    /// Static binary crypto scan, kicked off at capture start so it overlaps the
+    /// recording — by the time the user stops it's usually already done, keeping
+    /// Stop fast instead of blocking on a large bundle's scan.
+    pub static_scan: tokio::task::JoinHandle<Vec<cbom::CryptoEvidence>>,
 }
 
 /// The single active capture session, if any. Held as Tauri-managed state.
@@ -223,6 +227,13 @@ pub fn run() {
             setup_tray(app.handle())?;
             reconcile_autostart(app.handle());
 
+            // Keep an approved capture helper working across app updates: the
+            // updater swaps the bundled daemon binary in place, so re-register
+            // the (identically signed) service. No-op unless it's already
+            // enabled — first install is user-initiated, from the UI.
+            #[cfg(target_os = "macos")]
+            helper_mac::revalidate_on_launch();
+
             // Hide the window when launched at login (`--minimized`) so the app
             // boots straight into the background/tray.
             if std::env::args().any(|a| a == "--minimized") {
@@ -328,6 +339,7 @@ pub fn run() {
             commands::open_os_update,
             commands::helper_status,
             commands::helper_install,
+            commands::helper_uninstall,
             commands::helper_open_settings,
         ])
         .run(tauri::generate_context!())
