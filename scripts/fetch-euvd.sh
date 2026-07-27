@@ -45,6 +45,12 @@ mkdir -p "$out"
 
 urlenc() { jq -rn --arg s "$1" '$s|@uri'; }
 
+# One GET against the API. EUVD throttles request bursts — a Chrome-sized
+# product paginates ~34 back-to-back requests, enough for a 429 from a shared
+# CI runner IP — so let curl retry transient failures (429 and 5xx qualify)
+# with exponential backoff, honouring a Retry-After header when one is sent.
+euvd_get() { curl -fsS --retry 5 "$1"; }
+
 shards_json="{}"
 
 for entry in "${pairs[@]}"; do
@@ -56,13 +62,16 @@ for entry in "${pairs[@]}"; do
   # which drives pagination). Accumulating via files — not a shell variable —
   # keeps a multi-thousand-entry product like Chrome under the argv length limit.
   tmp="$(mktemp -d)"
-  curl -fsS "$api/search?vendor=$ev&product=$ep&size=$page_size&page=0" >"$tmp/p0000.json"
+  euvd_get "$api/search?vendor=$ev&product=$ep&size=$page_size&page=0" >"$tmp/p0000.json"
   total="$(jq -r '.total // 0' "$tmp/p0000.json")"
   pages=$(((total + page_size - 1) / page_size))
   ((pages > max_pages)) && pages=$max_pages
   ((pages < 1)) && pages=1
   for ((p = 1; p < pages; p++)); do
-    curl -fsS "$api/search?vendor=$ev&product=$ep&size=$page_size&page=$p" \
+    # Pace the pagination so we stay under the rate limit in the first place;
+    # the retry in euvd_get only softens the 429s this doesn't avoid.
+    sleep 1
+    euvd_get "$api/search?vendor=$ev&product=$ep&size=$page_size&page=$p" \
       >"$(printf '%s/p%04d.json' "$tmp" "$p")"
   done
 
