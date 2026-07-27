@@ -70,7 +70,7 @@ pub fn scan_tauri_version(binary_path: &Path) -> std::io::Result<Option<String>>
 
 /// Scan a binary for the Deno runtime version in its `Deno/x.y.z` UA token.
 pub fn scan_deno_version(binary_path: &Path) -> std::io::Result<Option<String>> {
-    let mmap = open_mmap(binary_path)?;
+    let mmap = map_bytes(binary_path)?;
     Ok(find_first(&DENO_RE, &mmap))
 }
 
