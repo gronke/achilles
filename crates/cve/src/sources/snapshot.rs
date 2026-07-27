@@ -11,6 +11,7 @@
 //! falls back to the public sources, so a missing/garbage snapshot is a no-op.
 
 use std::collections::BTreeMap;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 
 use serde::Deserialize;
@@ -37,15 +38,25 @@ pub struct Snapshot {
 }
 
 /// Path of the on-disk snapshot: `<cache-dir>/achilles/vdb-snapshot.json`
-/// (beside the per-lookup cache the live sources use).
+/// (beside the per-lookup cache the live sources use). Absent on the web
+/// build, which has no cache dir — see the wasm `load` below.
+#[cfg(not(target_arch = "wasm32"))]
 fn snapshot_path() -> Option<PathBuf> {
     Some(dirs::cache_dir()?.join("achilles").join("vdb-snapshot.json"))
 }
 
 /// Load the snapshot from disk, or `None` if it's absent/unreadable/garbage.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load() -> Option<Snapshot> {
     let bytes = std::fs::read(snapshot_path()?).ok()?;
     serde_json::from_slice(&bytes).ok()
+}
+
+/// The browser build has no on-disk snapshot; lookups fall through to the
+/// public sources (backed by the wasm EUVD shard store where loaded).
+#[cfg(target_arch = "wasm32")]
+pub fn load() -> Option<Snapshot> {
+    None
 }
 
 impl Snapshot {
