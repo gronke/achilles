@@ -19,6 +19,10 @@ if (!window.__TAURI_INTERNALS__ && !window.__TAURI__) {
 }
 
 function installWebShim() {
+  // Mark the host so the stylesheet can gate desktop-only chrome (the
+  // traffic-light window controls) off the web build.
+  document.documentElement.dataset.host = "web";
+
   // `wasm` is filled in once the module loads; `ready` gates anything that
   // needs it. main.js can destructure `window.__TAURI__` immediately because
   // we assign it synchronously at the end of this function.
