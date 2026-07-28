@@ -6,7 +6,7 @@
 // stable filenames), so we always prefer a fresh copy when online and fall back
 // to the cache only when offline. The app shell is pre-cached on install so the
 // very first offline load still works. Bump CACHE to evict everything.
-const CACHE = "achilles-browser-v2";
+const CACHE = "achilles-browser-v3";
 const SHELL = [
   "./",
   "./index.html",
@@ -17,6 +17,13 @@ const SHELL = [
   "./manifest.webmanifest",
   "./icon-192.png",
   "./icon-512.png",
+  "./icon-maskable.png",
+  // The wasm analysis core (~2.6 MB) is part of the shell: without it a
+  // first-ever offline launch renders a UI that can't analyze anything.
+  // addAll is atomic, so serving ui/ without a prior build-web.sh simply
+  // skips SW install — the app itself still works online.
+  "./pkg/achilles_wasm.js",
+  "./pkg/achilles_wasm_bg.wasm",
 ];
 
 self.addEventListener("install", (event) => {

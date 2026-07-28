@@ -193,13 +193,13 @@ function renderRow(det) {
   tr.innerHTML = `
     <td><span class="risk ${risk}">${risk}</span></td>
     <td class="name">${escapeHtml(name)}</td>
-    <td class="version">${escapeHtml(det.bundle_version ?? "")}</td>
+    <td class="version" data-label="Version">${escapeHtml(det.bundle_version ?? "")}</td>
     <td><span class="framework-tag ${escapeHtml(det.framework)}">${escapeHtml(det.framework)}</span></td>
-    <td class="version">${escapeHtml(v.electron ?? "")}</td>
-    <td class="version">${escapeHtml(v.chromium ?? "")}</td>
-    <td class="version">${escapeHtml(v.node ?? "")}</td>
-    <td class="version">${escapeHtml(v.tauri ?? "")}</td>
-    <td class="version">${escapeHtml(v.cef ?? "")}</td>
+    <td class="version" data-label="Electron">${escapeHtml(v.electron ?? "")}</td>
+    <td class="version" data-label="Chromium">${escapeHtml(v.chromium ?? "")}</td>
+    <td class="version" data-label="Node">${escapeHtml(v.node ?? "")}</td>
+    <td class="version" data-label="Tauri">${escapeHtml(v.tauri ?? "")}</td>
+    <td class="version" data-label="CEF">${escapeHtml(v.cef ?? "")}</td>
   `;
   tr.addEventListener("click", () => openDetail(det));
   return tr;
@@ -2180,7 +2180,10 @@ async function exportDetail() {
 document.querySelector("#export-all").addEventListener("click", exportAll);
 document.querySelector("#export-detail").addEventListener("click", exportDetail);
 
-rescanBtn.addEventListener("click", () => {
+// Empty the table and every per-app payload attached to it. Shared by the
+// desktop Rescan button and the web build's Clear button (which the shim
+// forwards as an "achilles:clear" event).
+function clearList() {
   rows.clear();
   // Drop the per-session detail cache too — otherwise a previously-opened app
   // keeps showing its pre-rescan audit/CVE payload (e.g. an old runtime
@@ -2190,8 +2193,16 @@ rescanBtn.addEventListener("click", () => {
   detailPanel.hidden = true;
   currentDetail = null;
   stopHelperPolling();
+  seenCount = 0;
+  expectedTotal = 0;
+}
+
+rescanBtn.addEventListener("click", () => {
+  clearList();
   startScan();
 });
+
+window.addEventListener("achilles:clear", clearList);
 
 // ---------- settings dialog ----------
 const settingsBtn = document.querySelector("#settings");
