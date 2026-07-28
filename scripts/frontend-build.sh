@@ -24,4 +24,12 @@ if [ -e ui/node_modules ]; then
   exit 1
 fi
 
+# Host-seam invariant: only platform.js (and the shim it wraps) may touch
+# window.__TAURI__ — everything else imports from platform.js.
+stray="$(grep -rl --include='*.js' '__TAURI__' ui --exclude-dir=pkg | grep -vE '/(platform|tauri-shim)\.js$' || true)"
+if [ -n "$stray" ]; then
+  printf 'error: __TAURI__ referenced outside the platform seam:\n%s\n' "$stray" >&2
+  exit 1
+fi
+
 exec web-modules build ui --out "$out" --manifest ui/package.json
