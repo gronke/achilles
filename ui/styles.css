@@ -145,6 +145,12 @@ html[data-host="web"] #window-controls {
   display: none;
 }
 
+/* The desktop Rescan (Spotlight re-enumeration) has no web meaning — the
+   shim-injected Open/Clear controls replace it there. */
+html[data-host="web"] #rescan {
+  display: none;
+}
+
 header h1 {
   font-size: 13px;
   font-weight: 600;
@@ -185,6 +191,13 @@ button {
 }
 
 button:disabled { opacity: 0.5; cursor: default; }
+
+/* Secondary header action: present but visually quiet. */
+.btn-quiet {
+  background: transparent;
+  border-color: var(--bg-3);
+  color: var(--fg-2);
+}
 
 :focus-visible {
   outline: 2px solid var(--accent);

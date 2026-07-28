@@ -504,25 +504,15 @@ function installWebShim() {
     setStatus(`${done}${problems.join("; ")}${hint}`);
   }
 
-  // `scan` is fired both on boot (no user gesture) and from the Rescan button
-  // (a gesture). `showDirectoryPicker` needs transient activation, so only open
-  // it when a gesture is active; otherwise just prompt.
+  // `scan` fires on boot (and from the desktop Rescan, which is hidden on the
+  // web) — never with the transient activation the pickers need — so it only
+  // sets the ingest hint. Actual ingestion runs through the injected header
+  // controls and the dropzone.
   async function webScan() {
-    if (window.showDirectoryPicker && navigator.userActivation?.isActive) {
-      try {
-        await scanViaDirectoryPicker();
-      } catch (e) {
-        if (e?.name !== "AbortError") {
-          console.warn("folder scan failed", e);
-          setStatus(`scan failed: ${e}`);
-        }
-      }
-      return;
-    }
     setStatus(
       window.showDirectoryPicker
-        ? `Click ‘Scan folder’ to choose a directory, or ‘Select file’ for ${SUPPORTED_FILES}.`
-        : `Click ‘Select file’ to choose ${SUPPORTED_FILES} — your browser has no folder picker.`,
+        ? `Click ‘Open’ to pick a folder (e.g. /Applications), or ‘archive…’ for ${SUPPORTED_FILES}.`
+        : `Click ‘Open’ to choose ${SUPPORTED_FILES}.`,
     );
   }
 
@@ -683,22 +673,9 @@ function installWebShim() {
   function injectControls() {
     const header = document.querySelector("header");
     if (!header) return;
-    const anchor = document.querySelector("#rescan") ?? header.lastElementChild;
-
-    if (window.showDirectoryPicker) {
-      const scanBtn = document.createElement("button");
-      scanBtn.type = "button";
-      scanBtn.textContent = "Scan folder";
-      scanBtn.title =
-        "Pick a folder: /Applications scans every .app in it, any other folder " +
-        "(a Windows install directory, a Linux app tree, one .app) is scanned as a single app";
-      scanBtn.addEventListener("click", () => {
-        void scanViaDirectoryPicker().catch((e) => {
-          if (e?.name !== "AbortError") setStatus(`scan failed: ${e}`);
-        });
-      });
-      header.insertBefore(scanBtn, anchor);
-    }
+    // Ingestion is the browser build's primary action: its controls go in
+    // front of the shared Export/Settings buttons.
+    const anchor = document.querySelector("#export-all") ?? header.lastElementChild;
 
     // `<select>` gets no styling from styles.css (the desktop build has none),
     // so match the header buttons here.
@@ -732,7 +709,6 @@ function installWebShim() {
     platformSelect.addEventListener("change", () => {
       forcedPlatform = platformSelect.value;
     });
-    header.insertBefore(platformSelect, anchor);
 
     const fileInput = document.createElement("input");
     fileInput.type = "file";
@@ -746,12 +722,57 @@ function installWebShim() {
       if (file) void scanViaFile(file);
       fileInput.value = "";
     });
-    const selectBtn = document.createElement("button");
-    selectBtn.type = "button";
-    selectBtn.textContent = "Select file";
-    selectBtn.title = `Select ${SUPPORTED_FILES}`;
-    selectBtn.addEventListener("click", () => fileInput.click());
-    header.insertBefore(selectBtn, anchor);
+
+    // One capability-aware "Open": the directory picker where the browser has
+    // one (a `.app` bundle is itself a directory, so that covers single apps
+    // too), the plain file picker everywhere else.
+    const openBtn = document.createElement("button");
+    openBtn.type = "button";
+    openBtn.textContent = "Open";
+    if (window.showDirectoryPicker) {
+      openBtn.title =
+        "Pick a folder: /Applications scans every .app in it, any other folder " +
+        "(a Windows install directory, a Linux app tree, one .app) is scanned as a single app";
+      openBtn.addEventListener("click", () => {
+        void scanViaDirectoryPicker().catch((e) => {
+          if (e?.name !== "AbortError") setStatus(`scan failed: ${e}`);
+        });
+      });
+    } else {
+      openBtn.title = `Choose ${SUPPORTED_FILES}`;
+      openBtn.addEventListener("click", () => fileInput.click());
+    }
+    header.insertBefore(openBtn, anchor);
+
+    // A directory picker can't select files, so browsers that got one keep a
+    // quiet secondary control for single-file uploads.
+    if (window.showDirectoryPicker) {
+      const archiveBtn = document.createElement("button");
+      archiveBtn.type = "button";
+      archiveBtn.className = "btn-quiet";
+      archiveBtn.textContent = "archive…";
+      archiveBtn.title = `Select ${SUPPORTED_FILES}`;
+      archiveBtn.addEventListener("click", () => fileInput.click());
+      header.insertBefore(archiveBtn, anchor);
+    }
+
+    // Which OS layout uploads are read as; applies to folders and files alike.
+    header.insertBefore(platformSelect, anchor);
+
+    // Clear: main.js owns the list state and empties it on this event; the
+    // analysis caches here go with it so a re-opened app re-analyses fresh.
+    const clearBtn = document.createElement("button");
+    clearBtn.type = "button";
+    clearBtn.textContent = "Clear";
+    clearBtn.title = "Empty the list and drop the analysis results";
+    clearBtn.addEventListener("click", () => {
+      window.dispatchEvent(new CustomEvent("achilles:clear"));
+      analyzed.clear();
+      rootToPath.clear();
+      void webScan(); // reset the status line to the ingest hint
+    });
+    header.insertBefore(clearBtn, anchor);
+
     header.appendChild(fileInput);
   }
 
@@ -922,7 +943,7 @@ function installWebShim() {
       show(true);
       setStatus(
         "Couldn't read the dropped folder — Safari can't reliably read dropped " +
-        "directories. Zip the app folder and drop (or ‘Select file’) the .zip instead.",
+        "directories. Zip the app folder and drop (or ‘Open’) the .zip instead.",
       );
       setTimeout(hide, 4000);
       return;

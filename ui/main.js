@@ -2180,7 +2180,10 @@ async function exportDetail() {
 document.querySelector("#export-all").addEventListener("click", exportAll);
 document.querySelector("#export-detail").addEventListener("click", exportDetail);
 
-rescanBtn.addEventListener("click", () => {
+// Empty the table and every per-app payload attached to it. Shared by the
+// desktop Rescan button and the web build's Clear button (which the shim
+// forwards as an "achilles:clear" event).
+function clearList() {
   rows.clear();
   // Drop the per-session detail cache too — otherwise a previously-opened app
   // keeps showing its pre-rescan audit/CVE payload (e.g. an old runtime
@@ -2190,8 +2193,16 @@ rescanBtn.addEventListener("click", () => {
   detailPanel.hidden = true;
   currentDetail = null;
   stopHelperPolling();
+  seenCount = 0;
+  expectedTotal = 0;
+}
+
+rescanBtn.addEventListener("click", () => {
+  clearList();
   startScan();
 });
+
+window.addEventListener("achilles:clear", clearList);
 
 // ---------- settings dialog ----------
 const settingsBtn = document.querySelector("#settings");
