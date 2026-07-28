@@ -787,6 +787,52 @@ dialog::backdrop {
   #apps tbody td:last-child {
     padding-right: 0;
   }
+
+  /* Settings: labels stack above their inputs — the max-content label column
+     otherwise squeezes inputs to nothing. Number rows ("Reassess every [n]
+     minutes") keep the input and its trailing unit on one wrappable line. */
+  #settings-form .source label.field {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+  #settings-form .source label.field:has(input[type="number"]) {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+  }
+}
+
+/* Phones: the settings dialog takes the whole screen, header and actions
+   pinned while the sources scroll between them. */
+@media (width < 420px) {
+  dialog {
+    width: 100vw;
+    max-width: none;
+    height: 100dvh;
+    max-height: none;
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+    padding-top: var(--safe-top);
+    padding-bottom: var(--safe-bottom);
+  }
+  #settings-form {
+    height: 100%;
+    overflow-y: auto;
+  }
+  #settings-form > header {
+    position: sticky;
+    top: 0;
+    background: var(--bg-2);
+    z-index: 1;
+  }
+  #settings-form > footer {
+    position: sticky;
+    bottom: 0;
+    background: var(--bg-2);
+    border-top: 1px solid var(--bg-3);
+  }
 }
 
 /* Touch ergonomics — keyed to the pointer, not the width, so touch-primary
