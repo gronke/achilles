@@ -59,8 +59,22 @@ sysinfo = "0.32"
 # rust-audit: extract cargo-auditable dependency data from binaries + parse the
 # RustSec advisory-db.
 auditable-extract = "0.3"
-flate2 = "1"
+# `rust_backend` (miniz_oxide) is flate2's default; pinned explicitly because
+# the C backends can't link on wasm, where `pkg` needs it.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 toml = "0.8"
+# `pkg`: the decompressors behind the Linux package formats. All pure Rust, so
+# the readers compile into the wasm bundle (a C backend has no libc to link
+# against there) as well as the desktop build.
+lzma-rs = "0.3"
+ruzstd = "0.9"
+lz4_flex = { version = "0.14", default-features = false, features = [
+    "std",
+    "safe-decode",
+    "checked-decode",
+    "frame",
+] }
+bzip2-rs = "0.1"
 # data-parallelism for the static-scan corpus loop
 rayon = "1.10"
 # wasm / browser entry point (the `achilles-wasm` crate); pinned centrally so
@@ -88,3 +102,4 @@ cbom = { path = "crates/cbom" }
 netmon = { path = "crates/netmon" }
 rust-audit = { path = "crates/rust-audit" }
 binmeta = { path = "crates/binmeta" }
+pkg = { path = "crates/pkg" }

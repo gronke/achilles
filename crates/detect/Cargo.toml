@@ -22,9 +22,13 @@ thiserror.workspace = true
 vfs.workspace = true
 
 # Binary string-scanning probes mmap the executable on native; on wasm they
-# read it into an owned buffer through `vfs` instead.
+# read it into an owned buffer through `vfs` instead. `pkg` expands a Linux
+# AppImage to a cache directory so the probes have a tree to walk — on wasm the
+# browser entry point has already unpacked the upload into the in-memory tree,
+# so neither is needed there.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 memmap2.workspace = true
+pkg.workspace = true
 
 # PE version resources are only ever read on a real Windows host or in the
 # browser (which may be handed a Windows app), so macOS / Linux desktop builds

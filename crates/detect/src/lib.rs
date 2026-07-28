@@ -44,7 +44,7 @@ mod system_webview;
 mod tauri;
 mod wails;
 
-pub use app::DiscoveredApp;
+pub use app::{is_app_binary, payload_executable, payload_name, DiscoveredApp};
 use app::Layout;
 pub use bundle::BundleInfo;
 
@@ -215,13 +215,18 @@ pub fn detect_app(app: &DiscoveredApp) -> Result<Detection, DetectError> {
         return Err(DetectError::NotFound(app.path.clone()));
     }
 
-    // A Windows Squirrel launcher stub points discovery at the install root,
-    // which has no runtime markers; redirect to the real versioned app dir so
-    // probes (and downstream audits, via `Detection.root`/`executable`) see it.
-    // `app.path` is preserved as the stable identity.
-    let redirected = (vfs::platform() == Platform::Windows)
-        .then(|| app::redirect_squirrel_stub(app))
-        .flatten();
+    // Two layouts hand discovery something that isn't the application itself: a
+    // Windows Squirrel launcher stub at an install root with no runtime markers,
+    // and a Linux AppImage, whose whole application is a compressed filesystem
+    // inside the file. Both redirect to the real tree so probes (and downstream
+    // audits, via `Detection.root`/`executable`) see it, preserving `app.path`
+    // as the stable identity.
+    let redirected = match vfs::platform() {
+        Platform::Windows => app::redirect_squirrel_stub(app),
+        #[cfg(not(target_arch = "wasm32"))]
+        Platform::Linux => app::redirect_appimage(app),
+        _ => None,
+    };
     let app = redirected.as_ref().unwrap_or(app);
 
     let bundle = metadata::read(app);

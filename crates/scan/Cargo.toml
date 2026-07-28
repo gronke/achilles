@@ -15,6 +15,11 @@ futures.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 
+# Recognising an AppImage during the sweep of the download directories — the
+# expansion itself happens later, in `detect`, so it shows up as scan progress.
+[target.'cfg(target_os = "linux")'.dependencies]
+pkg.workspace = true
+
 # Resolve Start Menu `.lnk` shortcuts to their target executables via the
 # Shell COM API (IShellLinkW) — lets the OS parse the link.
 [target.'cfg(target_os = "windows")'.dependencies]

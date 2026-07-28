@@ -38,6 +38,13 @@ use crate::upload;
 /// difference.
 const SCAN_ROOT: &str = "/scan";
 
+/// How far a Linux package may expand inside the wasm heap. Packages are
+/// compressed, so unlike a folder upload the size on disk says little about the
+/// size in memory; this matches the folder path's own ceiling so a package and
+/// a directory of the same app are treated alike, and turns a decompression
+/// bomb into a message rather than an out-of-memory trap.
+const MAX_PACKAGE_BYTES: u64 = 2 << 30;
+
 /// Combined result of analysing one app. Field names match the keys the UI
 /// already uses for its JSON export, so the shim can serve each `invoke(...)`
 /// from this single object.
@@ -117,12 +124,14 @@ impl Analyzer {
 }
 
 /// Analyse an uploaded app: a zipped app directory (`.app`, a Windows install
-/// folder, a Linux app tree), a bare executable, or a bare `app.asar`.
+/// folder, a Linux app tree), a Linux package (AppImage, snap, `.deb`, `.rpm`,
+/// tarball), a bare executable, or a bare `app.asar`.
 ///
 /// `bytes` is the raw upload; `filename` disambiguates a bare `.asar` from a
-/// zip when the magic is ambiguous. `platform` optionally forces the layout
-/// (`"macos"` / `"windows"` / `"linux"`) instead of inferring it. Returns the
-/// result JSON (same shape Tauri's `invoke` delivers) or throws an error string.
+/// zip when the magic is ambiguous, and names the tarball spellings that have
+/// no magic of their own. `platform` optionally forces the layout (`"macos"` /
+/// `"windows"` / `"linux"`) instead of inferring it. Returns the result JSON
+/// (same shape Tauri's `invoke` delivers) or throws an error string.
 #[wasm_bindgen]
 pub fn analyze_app(
     bytes: Vec<u8>,
@@ -160,6 +169,25 @@ pub fn analyze_app(
                 )));
             }
         }
+        Upload::Package(format) => {
+            let mut sink = TreeSink(&mut tree);
+            match pkg::unpack_with_limit(&bytes, format, &base, &mut sink, MAX_PACKAGE_BYTES) {
+                Ok(summary) => {
+                    notes.push(format!(
+                        "Unpacked a {} ({} files, {:.0} MB) and analysed the application inside it.",
+                        summary.format,
+                        summary.files,
+                        summary.bytes as f64 / (1024.0 * 1024.0),
+                    ));
+                    notes.extend(summary.warnings);
+                }
+                Err(e) => {
+                    return Err(JsValue::from_str(&format!(
+                        "could not read this {format}: {e}"
+                    )))
+                }
+            }
+        }
     }
 
     vfs::set_ambient(tree);
@@ -170,6 +198,8 @@ pub fn analyze_app(
         (Some(p), _) => p,
         (None, Upload::Asar) => Platform::Macos,
         (None, Upload::Binary(p)) => p,
+        // Every format `pkg` reads is a Linux one; there is nothing to sniff.
+        (None, Upload::Package(_)) => Platform::Linux,
         (None, Upload::Zip) => upload::sniff_platform(&base),
     };
     vfs::set_platform(platform);
@@ -177,8 +207,12 @@ pub fn analyze_app(
     let app = match kind {
         Upload::Asar => None,
         Upload::Binary(_) => Some(upload::single_binary(&base.join(binary_name(&filename)))),
-        Upload::Zip => {
-            let found = upload::find_app(&base, platform);
+        Upload::Zip | Upload::Package(_) => {
+            let found = if matches!(kind, Upload::Package(_)) {
+                upload::find_app_in_payload(&base)
+            } else {
+                upload::find_app(&base, platform)
+            };
             if found.is_none() {
                 notes.push(format!(
                     "Could not locate a {} application in the upload; analysed what was found.",
@@ -203,6 +237,8 @@ enum Upload {
     Asar,
     /// A single executable, with the platform its magic implies.
     Binary(Platform),
+    /// A Linux application package to unpack first — see the [`pkg`] crate.
+    Package(pkg::Format),
 }
 
 impl Upload {
@@ -213,6 +249,12 @@ impl Upload {
         let lower = filename.to_ascii_lowercase();
         if lower.ends_with(".asar") || looks_like_asar(bytes) {
             return Some(Upload::Asar);
+        }
+        // Packages come before the bare-binary check below: an AppImage is an
+        // ELF as well, and reading it as a lone executable would find only the
+        // runtime stub — never the application in the filesystem behind it.
+        if let Some(format) = pkg::sniff(bytes, filename) {
+            return Some(Upload::Package(format));
         }
         if bytes.starts_with(b"PK\x03\x04") || lower.ends_with(".zip") {
             return Some(Upload::Zip);
@@ -227,6 +269,30 @@ impl Upload {
             return Some(Upload::Binary(Platform::Linux));
         }
         None
+    }
+}
+
+/// Adapts [`pkg`]'s unpack sink to the in-memory tree the analysis reads.
+struct TreeSink<'a>(&'a mut MemTree);
+
+impl pkg::Sink for TreeSink<'_> {
+    fn dir(&mut self, path: &std::path::Path) -> Result<(), pkg::PkgError> {
+        self.0.insert_dir(path.to_path_buf());
+        Ok(())
+    }
+
+    fn file(&mut self, path: &std::path::Path, data: Vec<u8>, mode: u32) -> Result<(), pkg::PkgError> {
+        self.0.insert_file_with_mode(path.to_path_buf(), data, mode);
+        Ok(())
+    }
+
+    fn symlink(
+        &mut self,
+        path: &std::path::Path,
+        target: &std::path::Path,
+    ) -> Result<(), pkg::PkgError> {
+        self.0.insert_symlink(path.to_path_buf(), target.to_path_buf());
+        Ok(())
     }
 }
 
@@ -249,7 +315,8 @@ fn unsupported_message(bytes: &[u8]) -> &'static str {
                 on its own carries no bundle to analyse. Zip the whole .app and \
                 upload that instead.";
     }
-    "unrecognised file: expected a zipped app (.zip), a Windows .exe, a Linux \
+    "unrecognised file: expected a zipped app (.zip), a Linux package \
+     (.AppImage, .snap, .deb, .rpm, .tar.gz), a Windows .exe, a Linux \
      executable, or an app.asar."
 }
 

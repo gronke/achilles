@@ -146,6 +146,213 @@ fn first_versioned_exe(dir: &Path) -> Option<PathBuf> {
     None
 }
 
+/// An AppImage is a single file: the application is a squashfs filesystem
+/// appended to a runtime stub, so there is no directory to probe and the
+/// binary's own bytes reveal nothing — everything that identifies the app is
+/// compressed inside the payload.
+///
+/// If `app` points at one, expand it (once — the result is cached under
+/// `~/.cache/achilles/packages`, see [`pkg::extract_cached`]) and return a copy
+/// rooted in that tree. As with [`redirect_squirrel_stub`], `path` is preserved
+/// as the identity the UI keys on, so it survives the app being updated in
+/// place.
+///
+/// `None` when this isn't an AppImage or it couldn't be expanded — detection
+/// then proceeds against the file itself and reports what little it can, which
+/// beats failing the app outright.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn redirect_appimage(app: &DiscoveredApp) -> Option<DiscoveredApp> {
+    if !vfs::is_file(&app.path) || !pkg::is_expandable(&app.path) {
+        return None;
+    }
+    let payload = pkg::extract_cached(&app.path).ok()?;
+    let executable = payload_executable(&payload);
+    // The `.desktop` entry inside the AppImage is the app's own name for itself
+    // ("Achilles"); discovery only had the file to go on, which for a swept
+    // AppImage is a release filename ("Achilles_0.5.0_amd64").
+    let name = payload_name(&payload).or_else(|| app.name.clone());
+    // Root the app where its binary sits, as discovery does for any other Linux
+    // app: that's where `resources/` and the sibling `.so`s are. For the usual
+    // AppImage — binary at the top of the squashfs — that is the payload root
+    // itself; for one that ships a `usr/`-shaped tree it is the directory
+    // inside, which is where the app's own files actually are.
+    let root = executable
+        .as_deref()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .unwrap_or(payload);
+    Some(DiscoveredApp {
+        path: app.path.clone(),
+        executable,
+        root,
+        name,
+    })
+}
+
+/// The application binary inside an expanded package — an AppImage's squashfs
+/// root, a snap's mount, a `.deb`'s installed tree, the payload of an upload.
+///
+/// `AppRun` is the AppImage entry point by definition of the format, so it wins
+/// whenever it is a binary (or a symlink to one — [`vfs`] follows those). It is
+/// often a shell script instead, and the other package formats have no
+/// equivalent at all, so the fallback is the largest executable in the tree.
+///
+/// Size is the right tie-break here, and the reason the shallowest-first rule
+/// used for an app *folder* is not: a package reproduces a slice of a
+/// filesystem, so the shallowest binary is usually the `usr/bin` launcher while
+/// the application sits in `opt/Foo` or `usr/lib/foo`. An application binary
+/// dwarfs the stub that starts it, by a factor of thousands when it bundles a
+/// runtime.
+///
+/// Goes through [`vfs`], so the desktop reads a real cache directory and the
+/// browser reads the in-memory tree it unpacked an upload into.
+pub fn payload_executable(root: &Path) -> Option<PathBuf> {
+    let app_run = root.join("AppRun");
+    if is_app_binary(&app_run) {
+        return Some(app_run);
+    }
+    largest_executable(root)
+}
+
+/// What an expanded package calls itself, from the `.desktop` entry it ships.
+///
+/// Every package format carries one — it's how the app reaches the menu once
+/// installed, and mandatory in an AppImage — and it holds the name a human
+/// wrote (`Achilles`), which no path in the tree does. Naming the app after a
+/// directory instead gets you `bin`, since a packaged binary usually sits in
+/// `usr/bin`.
+///
+/// The conventional locations, in the order a payload is likely to use them:
+/// the AppImage root, then the installed-tree path a `.deb`/`.rpm`/tarball
+/// uses, then a snap's.
+pub fn payload_name(root: &Path) -> Option<String> {
+    [
+        root.to_path_buf(),
+        root.join("usr/share/applications"),
+        root.join("share/applications"),
+        root.join("meta/gui"),
+    ]
+    .into_iter()
+    .find_map(|dir| desktop_entry_name(&dir))
+}
+
+/// The `Name=` of the first `.desktop` file directly inside `dir`.
+fn desktop_entry_name(dir: &Path) -> Option<String> {
+    let mut entries: Vec<PathBuf> = vfs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension()
+                .map(|e| e.eq_ignore_ascii_case("desktop"))
+                .unwrap_or(false)
+        })
+        .collect();
+    // A payload may ship several (an app plus its URL handlers); sort so the
+    // choice doesn't depend on directory order.
+    entries.sort();
+
+    entries.iter().find_map(|path| {
+        let text = vfs::read_to_string(path).ok()?;
+        let mut in_entry = false;
+        for line in text.lines() {
+            let line = line.trim();
+            if line.starts_with('[') && line.ends_with(']') {
+                // Only the main group counts — an action group has a `Name`
+                // too, and it names the action ("New Window"), not the app.
+                in_entry = line == "[Desktop Entry]";
+                continue;
+            }
+            // The unlocalised key only: `Name[de]` is a translation.
+            if in_entry {
+                if let Some(value) = line.strip_prefix("Name=") {
+                    let value = value.trim();
+                    if !value.is_empty() {
+                        return Some(value.to_string());
+                    }
+                }
+            }
+        }
+        None
+    })
+}
+
+/// Helper binaries that ship beside an application but are not it.
+const PAYLOAD_HELPERS: &[&str] = &[
+    "chrome-sandbox",
+    "crashpad_handler",
+    "chrome_crashpad_handler",
+    "apprun",
+    "desktop-launch",
+];
+
+/// Depth and directory budget for the payload walk: an expanded package nests
+/// as deep as a filesystem slice (`usr/lib/x86_64-linux-gnu/…`), and a package
+/// with a big locale tree must not turn detection into a full disk walk.
+const PAYLOAD_MAX_DEPTH: u32 = 8;
+const PAYLOAD_MAX_DIRS: u32 = 20_000;
+
+fn largest_executable(root: &Path) -> Option<PathBuf> {
+    let mut best: Option<(u64, PathBuf)> = None;
+    let mut queue = std::collections::VecDeque::from([(root.to_path_buf(), 0u32)]);
+    let mut visited = 0u32;
+
+    while let Some((dir, depth)) = queue.pop_front() {
+        visited += 1;
+        if visited > PAYLOAD_MAX_DIRS {
+            break;
+        }
+        let Ok(entries) = vfs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            // A package points several names at one binary (`usr/bin/foo`, the
+            // `.build-id` entries); following those would root the app in
+            // whichever directory happened to hold an alias.
+            if entry.file_type().map(|t| t.is_symlink()).unwrap_or(false) {
+                continue;
+            }
+            if vfs::is_dir(&path) {
+                if depth < PAYLOAD_MAX_DEPTH {
+                    queue.push_back((path, depth + 1));
+                }
+                continue;
+            }
+            if !is_app_binary(&path) {
+                continue;
+            }
+            let size = vfs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            if best.as_ref().map(|(b, _)| size > *b).unwrap_or(true) {
+                best = Some((size, path));
+            }
+        }
+    }
+    best.map(|(_, path)| path)
+}
+
+/// True for a file that could be an application's main binary: an ELF that
+/// isn't a shared object and isn't a known helper.
+pub fn is_app_binary(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    if name.ends_with(".so") || name.contains(".so.") {
+        return false;
+    }
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    if PAYLOAD_HELPERS.contains(&stem.as_str()) {
+        return false;
+    }
+    vfs::read_prefix(path, 4)
+        .map(|p| p == b"\x7fELF")
+        .unwrap_or(false)
+}
+
 /// Resolved on-disk layout for a discovered app. Probes consult this rather
 /// than joining platform paths themselves.
 pub(crate) struct Layout {

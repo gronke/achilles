@@ -441,12 +441,15 @@ function installWebShim() {
 
   // What a single upload may be. Achilles reads macOS, Windows, and Linux apps
   // alike — the wasm side infers which from the tree — so the accepted shapes
-  // are "an app folder", "a zip of one", or "a lone binary".
+  // are "an app folder", "a zip of one", "a Linux package", or "a lone binary".
   const SUPPORTED_FILES =
-    "a zipped app (.zip), a Windows .exe, a Linux executable, or an app.asar";
+    "a zipped app (.zip), a Linux package (.AppImage, .snap, .deb, .rpm, .tar.gz), " +
+    "a Windows .exe, a Linux executable, or an app.asar";
   const SUPPORTED_DROP = `an app folder (.app / a Windows or Linux app directory), ${SUPPORTED_FILES}`;
-  // Extensions we accept as a single-file upload.
-  const FILE_RE = /\.(zip|asar|exe)$/i;
+  // Extensions we accept as a single-file upload. The Linux package formats are
+  // unpacked wasm-side before the usual analysis runs — see the `pkg` crate.
+  const FILE_RE =
+    /\.(zip|asar|exe|appimage|snap|deb|rpm|tar|tgz|txz|tbz2?|tzst|tar\.(gz|xz|bz2|zst|lz4|lzma))$/i;
   // …but a Linux app binary carries no extension at all, so an extension-less
   // file is a candidate too. The wasm side reads its magic and rejects it with
   // a specific message if it turns out not to be an app, so guessing generously
