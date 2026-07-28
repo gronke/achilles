@@ -664,6 +664,11 @@ dialog::backdrop {
     padding: calc(10px + var(--safe-top)) calc(var(--pad-panel) + var(--safe-right))
       10px calc(var(--pad-panel) + var(--safe-left));
   }
+  /* The title takes its own row, so the buttons flow as one uniform
+     wrapping row beneath it instead of splitting raggedly around it. */
+  #app > header h1 {
+    flex: 1 1 100%;
+  }
   #status {
     flex: 1 1 100%;
     order: 10;
