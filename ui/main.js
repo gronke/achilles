@@ -193,13 +193,13 @@ function renderRow(det) {
   tr.innerHTML = `
     <td><span class="risk ${risk}">${risk}</span></td>
     <td class="name">${escapeHtml(name)}</td>
-    <td class="version">${escapeHtml(det.bundle_version ?? "")}</td>
+    <td class="version" data-label="Version">${escapeHtml(det.bundle_version ?? "")}</td>
     <td><span class="framework-tag ${escapeHtml(det.framework)}">${escapeHtml(det.framework)}</span></td>
-    <td class="version">${escapeHtml(v.electron ?? "")}</td>
-    <td class="version">${escapeHtml(v.chromium ?? "")}</td>
-    <td class="version">${escapeHtml(v.node ?? "")}</td>
-    <td class="version">${escapeHtml(v.tauri ?? "")}</td>
-    <td class="version">${escapeHtml(v.cef ?? "")}</td>
+    <td class="version" data-label="Electron">${escapeHtml(v.electron ?? "")}</td>
+    <td class="version" data-label="Chromium">${escapeHtml(v.chromium ?? "")}</td>
+    <td class="version" data-label="Node">${escapeHtml(v.node ?? "")}</td>
+    <td class="version" data-label="Tauri">${escapeHtml(v.tauri ?? "")}</td>
+    <td class="version" data-label="CEF">${escapeHtml(v.cef ?? "")}</td>
   `;
   tr.addEventListener("click", () => openDetail(det));
   return tr;
