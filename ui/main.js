@@ -15,6 +15,9 @@ import {
   relaunch,
   appWindow as platformWindow,
 } from "./platform.js";
+// Lit resolution smoke test — see ach-smoke.js; removed with the first real
+// component in L1.
+import "./ach-smoke.js";
 
 const tbody = document.querySelector("#apps tbody");
 const theadRow = document.querySelector("#apps thead tr");
