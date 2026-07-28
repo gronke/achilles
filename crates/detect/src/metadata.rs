@@ -3,58 +3,47 @@
 //! the PE version resource; Linux uses the name carried from the `.desktop`
 //! entry by discovery.
 
+use vfs::Platform;
+
 use crate::app::DiscoveredApp;
 use crate::bundle::BundleInfo;
 
 /// Read whatever metadata the platform exposes for `app`, falling back to
 /// fields already present on the [`DiscoveredApp`].
 pub fn read(app: &DiscoveredApp) -> BundleInfo {
-    #[cfg(macos_layout)]
-    {
+    match vfs::platform() {
         // The `.app` carries everything in Info.plist.
-        let mut info = crate::bundle::read(&app.root);
-        if info.executable.is_none() {
-            info.executable = app.executable.clone();
+        Platform::Macos => {
+            let mut info = crate::bundle::read(&app.root);
+            if info.executable.is_none() {
+                info.executable = app.executable.clone();
+            }
+            info
         }
-        info
-    }
-
-    #[cfg(all(target_os = "windows", not(macos_layout)))]
-    {
-        let mut info = app
-            .executable
-            .as_deref()
-            .map(windows::read_pe_metadata)
-            .unwrap_or_default();
-        info.display_name = info.display_name.or_else(|| app.name.clone());
-        info.executable = info.executable.or_else(|| app.executable.clone());
-        info
-    }
-
-    #[cfg(all(target_os = "linux", not(macos_layout)))]
-    {
-        BundleInfo {
-            // `.desktop` `Name=` is the only reliable display name; the binary
-            // rarely embeds one.
+        Platform::Windows => {
+            let mut info = app
+                .executable
+                .as_deref()
+                .map(windows::read_pe_metadata)
+                .unwrap_or_default();
+            info.display_name = info.display_name.or_else(|| app.name.clone());
+            info.executable = info.executable.or_else(|| app.executable.clone());
+            info
+        }
+        // `.desktop` `Name=` is the only reliable display name; the binary
+        // rarely embeds one.
+        Platform::Linux => BundleInfo {
             display_name: app.name.clone(),
             bundle_id: None,
             bundle_version: None,
             executable: app.executable.clone(),
-        }
-    }
-
-    #[cfg(not(any(macos_layout, target_os = "windows", target_os = "linux")))]
-    {
-        BundleInfo {
-            display_name: app.name.clone(),
-            bundle_id: None,
-            bundle_version: None,
-            executable: app.executable.clone(),
-        }
+        },
     }
 }
 
-#[cfg(target_os = "windows")]
+/// Builds that can actually be handed a PE to read: a real Windows host, and
+/// wasm (where the browser may be given a Windows app). macOS / Linux desktop
+/// builds never meet one, so they skip `pelite` entirely.
 mod windows {
     use std::path::Path;
 
@@ -62,17 +51,29 @@ mod windows {
 
     /// Read the PE `VS_VERSIONINFO` resource for product name / version /
     /// company. Best effort — a binary with no version resource yields an
-    /// empty [`BundleInfo`].
+    /// empty [`BundleInfo`], as does a build without `pelite`.
     pub fn read_pe_metadata(exe: &Path) -> BundleInfo {
-        let mut info = BundleInfo {
+        let info = BundleInfo {
             executable: Some(exe.to_path_buf()),
             ..BundleInfo::default()
         };
 
-        let Ok(map) = (|| -> Result<pelite::FileMap, _> { pelite::FileMap::open(exe) })() else {
+        #[cfg(any(target_os = "windows", target_arch = "wasm32"))]
+        {
+            read_version_resource(exe, info)
+        }
+        #[cfg(not(any(target_os = "windows", target_arch = "wasm32")))]
+        {
+            info
+        }
+    }
+
+    #[cfg(any(target_os = "windows", target_arch = "wasm32"))]
+    fn read_version_resource(exe: &Path, mut info: BundleInfo) -> BundleInfo {
+        let Some(bytes) = pe_bytes(exe) else {
             return info;
         };
-        let Ok(image) = pelite::PeFile::from_bytes(map.as_ref()) else {
+        let Ok(image) = pelite::PeFile::from_bytes(bytes.as_ref()) else {
             return info;
         };
         let Ok(resources) = image.resources() else {
@@ -103,5 +104,18 @@ mod windows {
         }
 
         info
+    }
+
+    /// Bytes to parse: a read-only mmap on a real Windows host (these binaries
+    /// run to hundreds of MB and only the headers + resource tree are touched),
+    /// an owned buffer from the in-memory upload tree on wasm.
+    #[cfg(target_os = "windows")]
+    fn pe_bytes(exe: &Path) -> Option<impl AsRef<[u8]>> {
+        pelite::FileMap::open(exe).ok()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn pe_bytes(exe: &Path) -> Option<impl AsRef<[u8]>> {
+        vfs::read(exe).ok()
     }
 }

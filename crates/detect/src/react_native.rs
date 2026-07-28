@@ -23,8 +23,7 @@ pub struct Detection {
 }
 
 pub fn detect(layout: &Layout) -> Result<Option<Detection>, crate::DetectError> {
-    #[cfg(macos_layout)]
-    {
+    if layout.is_bundle() {
         let hermes_dir = layout.frameworks_dir().join("hermes.framework");
         if vfs::is_dir(&hermes_dir) {
             let version = read_hermes_version(&hermes_dir).or(Some("unknown".to_string()));
@@ -33,16 +32,11 @@ pub fn detect(layout: &Layout) -> Result<Option<Detection>, crate::DetectError> 
                 bundled_engine: true,
             }));
         }
-    }
-
-    #[cfg(not(macos_layout))]
-    {
-        if layout.has_library("hermes") || layout.has_library("reactnative") {
-            return Ok(Some(Detection {
-                version: Some("unknown".to_string()),
-                bundled_engine: true,
-            }));
-        }
+    } else if layout.has_library("hermes") || layout.has_library("reactnative") {
+        return Ok(Some(Detection {
+            version: Some("unknown".to_string()),
+            bundled_engine: true,
+        }));
     }
 
     // Engine not bundled separately — fall back to string-scanning the main
@@ -63,7 +57,6 @@ pub fn detect(layout: &Layout) -> Result<Option<Detection>, crate::DetectError> 
     Ok(None)
 }
 
-#[cfg(macos_layout)]
 fn read_hermes_version(framework_dir: &std::path::Path) -> Option<String> {
     for rel in &["Versions/A/Resources/Info.plist", "Resources/Info.plist"] {
         let plist = framework_dir.join(rel);

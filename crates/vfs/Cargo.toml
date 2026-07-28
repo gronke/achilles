@@ -9,5 +9,7 @@ repository.workspace = true
 description = "Minimal filesystem abstraction: std::fs on native, an in-memory tree on wasm"
 
 [dependencies]
-# Intentionally dependency-free. The native backend forwards to std::fs; the
-# wasm backend uses only std collections + a thread-local.
+# Near dependency-free: the native backend forwards to std::fs and the wasm
+# backend uses only std collections + a thread-local. `serde` is here solely so
+# `Platform` crosses the JSON boundary with the rest of a scan result.
+serde.workspace = true

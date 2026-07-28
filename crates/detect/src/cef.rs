@@ -18,8 +18,7 @@ use crate::app::Layout;
 
 /// Return the embedded Chromium build if the app embeds CEF, else `None`.
 pub fn detect(layout: &Layout) -> Option<String> {
-    #[cfg(macos_layout)]
-    {
+    if layout.is_bundle() {
         let framework_dir = layout
             .frameworks_dir()
             .join("Chromium Embedded Framework.framework");
@@ -55,25 +54,22 @@ pub fn detect(layout: &Layout) -> Option<String> {
                 return Some(v);
             }
         }
-        Some("unknown".to_string())
+        return Some("unknown".to_string());
     }
-    #[cfg(not(macos_layout))]
-    {
-        if !layout.has_library("libcef") {
-            return None;
-        }
-        // Scan the CEF library (or the main exe) for the Chromium UA version.
-        let target = layout
-            .find_file("libcef")
-            .or_else(|| layout.executable.clone());
-        let version = target
-            .and_then(|p| crate::strings::scan_electron_versions(&p).ok())
-            .and_then(|(chromium, _)| chromium);
-        Some(version.unwrap_or_else(|| "unknown".to_string()))
+
+    if !layout.has_library("libcef") {
+        return None;
     }
+    // Scan the CEF library (or the main exe) for the Chromium UA version.
+    let target = layout
+        .find_file("libcef")
+        .or_else(|| layout.executable.clone());
+    let version = target
+        .and_then(|p| crate::strings::scan_electron_versions(&p).ok())
+        .and_then(|(chromium, _)| chromium);
+    Some(version.unwrap_or_else(|| "unknown".to_string()))
 }
 
-#[cfg(macos_layout)]
 fn read_plist_version(plist_path: &std::path::Path) -> Option<String> {
     let value = crate::read_plist(plist_path)?;
     let dict = value.as_dictionary()?;

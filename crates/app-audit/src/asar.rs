@@ -54,10 +54,9 @@ pub struct AsarInfo {
 
 /// Build an [`AsarInfo`] for the Windows / Linux `resources/app.asar` under
 /// `root`, or `None` when the app ships no asar.
-#[cfg(not(macos_layout))]
 pub fn info(root: &Path) -> Option<AsarInfo> {
     let archive_path = root.join("resources").join("app.asar");
-    if !archive_path.is_file() {
+    if !vfs::is_file(&archive_path) {
         return None;
     }
     let header_sha256 = sha256_asar_header(&archive_path).ok();
@@ -69,8 +68,8 @@ pub fn info(root: &Path) -> Option<AsarInfo> {
 
 /// Returns `None` if the bundle has no `ElectronAsarIntegrity` entry (i.e.
 /// it's not an Electron app, or it's an Electron app with integrity
-/// disabled). macOS-only: the declared hash lives in `Contents/Info.plist`.
-#[cfg(macos_layout)]
+/// disabled). Bundle layout only: the declared hash lives in
+/// `Contents/Info.plist`.
 pub fn verify_all(app_path: &Path) -> Option<Vec<AsarIntegrityCheck>> {
     let plist_path = app_path.join("Contents/Info.plist");
     let value = crate::read_plist(&plist_path)?;

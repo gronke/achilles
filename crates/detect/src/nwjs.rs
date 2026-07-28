@@ -18,30 +18,26 @@ pub struct Detection {
 }
 
 pub fn detect(layout: &Layout) -> Result<Option<Detection>, crate::DetectError> {
-    #[cfg(macos_layout)]
-    {
-        macos::detect(layout)
+    if layout.is_bundle() {
+        return macos::detect(layout);
     }
-    #[cfg(not(macos_layout))]
-    {
-        let has_nw = layout.has_library("nw.dll") || layout.find_file("libnw").is_some();
-        if !has_nw {
-            return Ok(None);
-        }
-        let chromium_version = layout
-            .find_file("nw.dll")
-            .or_else(|| layout.find_file("libnw"))
-            .or_else(|| layout.executable.clone())
-            .and_then(|p| strings::scan_electron_versions(&p).ok())
-            .and_then(|(chromium, _)| chromium);
-        Ok(Some(Detection {
-            nwjs_version: Some("unknown".to_string()),
-            chromium_version,
-        }))
+
+    let has_nw = layout.has_library("nw.dll") || layout.find_file("libnw").is_some();
+    if !has_nw {
+        return Ok(None);
     }
+    let chromium_version = layout
+        .find_file("nw.dll")
+        .or_else(|| layout.find_file("libnw"))
+        .or_else(|| layout.executable.clone())
+        .and_then(|p| strings::scan_electron_versions(&p).ok())
+        .and_then(|(chromium, _)| chromium);
+    Ok(Some(Detection {
+        nwjs_version: Some("unknown".to_string()),
+        chromium_version,
+    }))
 }
 
-#[cfg(macos_layout)]
 mod macos {
     use std::path::Path;
 

@@ -27,6 +27,13 @@ const GUARD_CF: u16 = 0x4000; // Control Flow Guard
 // WIN_CERTIFICATE.wCertificateType — the only type Authenticode uses.
 const WIN_CERT_TYPE_PKCS_SIGNED_DATA: u16 = 0x0002;
 
+/// Whether `WinVerifyTrust` is reachable — i.e. we're on a real Windows host,
+/// not auditing an uploaded `.exe` from macOS, Linux, or the browser.
+const TRUST_STORE_AVAILABLE: bool = cfg!(target_os = "windows");
+
+const NO_TRUST_STORE_NOTE: &str =
+    "signature present; chain not verified (needs a Windows host's trust store)";
+
 #[derive(Debug, Clone, Serialize)]
 pub struct WindowsAudit {
     pub path: PathBuf,
@@ -74,17 +81,24 @@ pub struct WindowsManifest {
 }
 
 pub fn audit(path: &Path, root: &Path, executable: Option<&Path>) -> WindowsAudit {
-    let bytes = executable.and_then(|exe| std::fs::read(exe).ok());
+    let bytes = executable.and_then(|exe| vfs::read(exe).ok());
 
     let (mut signature, hardening) = match bytes.as_deref().map(parse_pe) {
         Some((sig, hard)) => (sig, hard),
         None => (WindowsSignature::default(), PeHardening::default()),
     };
 
-    // Trust verification consults the OS store and needs the file path.
+    // Trust verification consults the OS trust store, so it only means anything
+    // on a real Windows host; elsewhere `trusted` stays `None` and the note says
+    // why. The signature's *presence* and signer are read from the PE either way.
     if signature.signed {
         if let Some(exe) = executable {
             signature.trusted = verify_trust(exe);
+        }
+        if signature.trusted.is_none() && !TRUST_STORE_AVAILABLE {
+            signature
+                .note
+                .get_or_insert_with(|| NO_TRUST_STORE_NOTE.to_string());
         }
     }
 
@@ -204,6 +218,14 @@ fn extract_signer(bytes: &[u8], start: usize, size: usize) -> Option<(String, St
 }
 
 /// Verify the file's Authenticode signature against the OS trust store.
+/// Windows-only — nothing else has one to consult.
+#[cfg(not(target_os = "windows"))]
+fn verify_trust(_exe: &Path) -> Option<bool> {
+    None
+}
+
+/// Verify the file's Authenticode signature against the OS trust store.
+#[cfg(target_os = "windows")]
 fn verify_trust(exe: &Path) -> Option<bool> {
     use std::os::windows::ffi::OsStrExt;
 

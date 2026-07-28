@@ -6,26 +6,30 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Browser/WASM entry point: analyse an uploaded .app (zipped) or app.asar"
+description = "Browser/WASM entry point: analyse an uploaded macOS, Windows, or Linux app"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
-# Everything here is wasm-only. On native this crate compiles to an empty lib
-# (see the `#![cfg(target_arch = "wasm32")]` in lib.rs), so `cargo build
-# --workspace` on the desktop stays fast and never pulls these deps.
+# The `upload` module (which platform an uploaded tree follows, and where the
+# app sits inside it) is plain `vfs` code, so it builds — and is tested —
+# natively too. Both crates are already part of the desktop build.
+[dependencies]
+detect.workspace = true
+vfs.workspace = true
+
+# The JS bindings and everything they reach for are wasm-only, so a desktop
+# `cargo build --workspace` never pulls them.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen.workspace = true
 wasm-bindgen-futures.workspace = true
 js-sys.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-vfs.workspace = true
-detect = { workspace = true, features = ["macos-bundle"] }
 static-scan.workspace = true
 cve.workspace = true
 # Direct path dep (not `workspace = true`) so `default-features = false` takes
 # effect — it turns off the `codesign` feature (and tokio) for the wasm build,
 # which `workspace = true` would silently ignore.
-app-audit = { path = "../app-audit", default-features = false, features = ["macos-bundle"] }
+app-audit = { path = "../app-audit", default-features = false }
 zip.workspace = true

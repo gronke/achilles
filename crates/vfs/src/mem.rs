@@ -172,6 +172,20 @@ pub fn read_to_string(path: impl AsRef<Path>) -> io::Result<String> {
     String::from_utf8(bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
+/// Read at most the first `len` bytes of `path`. The tree already holds the
+/// bytes, so this just slices — the point is to avoid cloning a 200 MB buffer
+/// for a magic-number check.
+pub fn read_prefix(path: impl AsRef<Path>, len: usize) -> io::Result<Vec<u8>> {
+    let path = path.as_ref();
+    with_ambient(
+        |tree| match tree.get_resolved(path) {
+            Some(Node::File { bytes, .. }) => Ok(bytes[..len.min(bytes.len())].to_vec()),
+            _ => Err(not_found(path)),
+        },
+        path,
+    )
+}
+
 pub fn read_dir(path: impl AsRef<Path>) -> io::Result<ReadDir> {
     let path = path.as_ref();
     with_ambient(

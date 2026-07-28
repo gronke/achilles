@@ -29,8 +29,10 @@ dirs = "6"
 # cross-platform binary parsing: ELF (Linux) + PE (Windows) headers, imports,
 # program headers for the audit + detection layers
 goblin = "0.9"
-# PE version resources + DllCharacteristics + embedded manifests (Windows)
-pelite = "0.10"
+# PE version resources + DllCharacteristics + embedded manifests (Windows).
+# `mmap` (the default) pulls in libc/winapi, so it's opt-in per target: on by
+# default nowhere, added back by the Windows build, left off for wasm.
+pelite = { version = "0.10", default-features = false, features = ["derive_pod"] }
 # Windows registry access (system webview, autostart, native-messaging hosts)
 winreg = "0.52"
 # Parse the embedded Authenticode PKCS#7 to read the signer certificate

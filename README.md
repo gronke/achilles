@@ -225,7 +225,17 @@ For every discovered app it extracts:
   ├─ crates/netmon-helper privileged (root) capture daemon, macOS (SMAppService)
   ├─ crates/cbom          crypto evidence → CycloneDX CBOM + PQC grading
   └─ crates/rust-audit    cargo-auditable extraction + RustSec advisory match
+  ├─ crates/vfs           std::fs on the desktop, an in-memory tree in the
+  │                       browser — plus the ambient Platform the analysis
+  │                       crates read to pick a layout
+  └─ crates/achilles-wasm browser entry point: unpack an uploaded macOS,
+                          Windows, or Linux app and run the same analysis
 ```
+
+`detect` and `app-audit` are written against `vfs::platform()` rather than
+`cfg!(target_os)`, so the desktop build folds them to the host OS at compile
+time while the browser build picks a layout per upload — a `.app` bundle, a
+Windows install directory, or a Linux app tree, whichever the files look like.
 
 Each crate has an `examples/` binary so you can exercise it in isolation.
 

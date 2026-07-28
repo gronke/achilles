@@ -6,8 +6,14 @@
 //! objects / a `resources/` dir). [`Layout`] hides that difference: a probe
 //! asks "where do frameworks live?" / "is library X present?" instead of
 //! hardcoding `Contents/Frameworks/...`.
+//!
+//! Which convention applies comes from [`vfs::platform`] — the host OS on the
+//! desktop (a compile-time constant, so the other arms fold away), and whatever
+//! the browser was handed on wasm.
 
 use std::path::{Path, PathBuf};
+
+use vfs::Platform;
 
 /// One application found by discovery, in a form every consumer
 /// (`detect` / `app-audit` / `sideeffects`) can use without re-deriving
@@ -34,32 +40,26 @@ pub struct DiscoveredApp {
 
 impl DiscoveredApp {
     /// Build a [`DiscoveredApp`] from a single user-supplied path (the
-    /// "open this specific app" case). Platform-specific because the path
-    /// means different things on each OS.
+    /// "open this specific app" case). The path means different things per
+    /// platform: a `.app` directory on macOS, an executable elsewhere.
     pub fn from_path(path: &Path) -> Self {
-        #[cfg(macos_layout)]
-        {
-            // Path points at a `.app` directory.
-            DiscoveredApp {
+        if vfs::platform().is_bundle() {
+            return DiscoveredApp {
                 path: path.to_path_buf(),
                 root: path.to_path_buf(),
                 executable: None,
                 name: None,
-            }
+            };
         }
-        #[cfg(not(macos_layout))]
-        {
-            // Path points at an executable.
-            let root = path
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| path.to_path_buf());
-            DiscoveredApp {
-                path: path.to_path_buf(),
-                root,
-                executable: Some(path.to_path_buf()),
-                name: None,
-            }
+        let root = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| path.to_path_buf());
+        DiscoveredApp {
+            path: path.to_path_buf(),
+            root,
+            executable: Some(path.to_path_buf()),
+            name: None,
         }
     }
 }
@@ -75,10 +75,9 @@ impl DiscoveredApp {
 /// binary and its `resources/`. `path` (the stable identity the UI keys on) is
 /// preserved, so it survives version bumps. Returns `None` when this isn't a
 /// Squirrel layout, leaving the app untouched.
-#[cfg(target_os = "windows")]
 pub(crate) fn redirect_squirrel_stub(app: &DiscoveredApp) -> Option<DiscoveredApp> {
     // A genuine Squirrel root has `Update.exe` sitting beside the stub.
-    if !app.root.join("Update.exe").is_file() {
+    if !vfs::is_file(app.root.join("Update.exe")) {
         return None;
     }
     let versioned = newest_squirrel_app_dir(&app.root)?;
@@ -91,7 +90,7 @@ pub(crate) fn redirect_squirrel_stub(app: &DiscoveredApp) -> Option<DiscoveredAp
         .as_ref()
         .and_then(|e| e.file_name())
         .map(|n| versioned.join(n))
-        .filter(|p| p.is_file())
+        .filter(|p| vfs::is_file(p))
         .or_else(|| first_versioned_exe(&versioned));
 
     Some(DiscoveredApp {
@@ -104,12 +103,11 @@ pub(crate) fn redirect_squirrel_stub(app: &DiscoveredApp) -> Option<DiscoveredAp
 
 /// Newest `app-<version>` subdirectory of a Squirrel install root, compared by
 /// dotted numeric version (so `app-12.10.0` beats `app-12.2.0`).
-#[cfg(target_os = "windows")]
 fn newest_squirrel_app_dir(root: &Path) -> Option<PathBuf> {
     let mut best: Option<(Vec<u64>, PathBuf)> = None;
-    for entry in std::fs::read_dir(root).ok()?.flatten() {
+    for entry in vfs::read_dir(root).ok()?.flatten() {
         let path = entry.path();
-        if !path.is_dir() {
+        if !vfs::is_dir(&path) {
             continue;
         }
         let name = entry.file_name();
@@ -130,9 +128,8 @@ fn newest_squirrel_app_dir(root: &Path) -> Option<PathBuf> {
 
 /// First non-helper `.exe` directly inside a Squirrel versioned dir, skipping
 /// the bundled `squirrel.exe` / `Update.exe` maintenance binaries.
-#[cfg(target_os = "windows")]
 fn first_versioned_exe(dir: &Path) -> Option<PathBuf> {
-    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+    for entry in vfs::read_dir(dir).ok()?.flatten() {
         let path = entry.path();
         if path.extension().map(|e| e.eq_ignore_ascii_case("exe")) != Some(true) {
             continue;
@@ -157,10 +154,12 @@ pub(crate) struct Layout {
     /// Effective primary executable, after resolving `CFBundleExecutable` on
     /// macOS. May still be `None` if nothing was declared / found.
     pub executable: Option<PathBuf>,
+    /// Layout convention this app follows. Captured once at construction so a
+    /// probe can't observe it changing mid-detection.
+    pub platform: Platform,
     /// Lower-cased basenames of the libraries the executable imports
-    /// (ELF `DT_NEEDED` / PE import table). Empty on macOS or when the binary
-    /// can't be parsed. Lazily filled by [`Layout::imports`].
-    #[allow(dead_code)] // read by the non-macOS probes via `has_library`
+    /// (ELF `DT_NEEDED` / PE import table). Empty under the bundle layout or
+    /// when the binary can't be parsed. Lazily filled by [`Layout::imports`].
     imports: std::cell::OnceCell<Vec<String>>,
 }
 
@@ -169,22 +168,24 @@ impl Layout {
         Layout {
             root,
             executable,
+            platform: vfs::platform(),
             imports: std::cell::OnceCell::new(),
         }
+    }
+
+    /// True when this app uses the macOS `.app` bundle layout.
+    pub(crate) fn is_bundle(&self) -> bool {
+        self.platform.is_bundle()
     }
 
     /// Directory where shared frameworks / runtime libraries live.
     ///
     /// * macOS: `root/Contents/Frameworks`.
     /// * Windows / Linux: `root` (DLLs / `.so`s sit beside the executable).
-    #[allow(dead_code)] // used by the macOS framework probes
     pub(crate) fn frameworks_dir(&self) -> PathBuf {
-        #[cfg(macos_layout)]
-        {
+        if self.is_bundle() {
             self.root.join("Contents/Frameworks")
-        }
-        #[cfg(not(macos_layout))]
-        {
+        } else {
             self.root.clone()
         }
     }
@@ -193,23 +194,18 @@ impl Layout {
     ///
     /// * macOS: `root/Contents/Resources`.
     /// * Windows / Linux: `root/resources`.
-    #[allow(dead_code)] // used by the non-macOS Electron probe
     pub(crate) fn resources_dir(&self) -> PathBuf {
-        #[cfg(macos_layout)]
-        {
+        if self.is_bundle() {
             self.root.join("Contents/Resources")
-        }
-        #[cfg(not(macos_layout))]
-        {
+        } else {
             self.root.join("resources")
         }
     }
 
     /// True if the executable imports a library whose name contains `needle`,
     /// or a sibling file in the app's *private* `root` (or `root/lib`) matches.
-    /// Used by non-macOS probes to find `.dll` / `.so` framework markers whether
-    /// bundled or system-linked.
-    #[allow(dead_code)] // used by the non-macOS probes
+    /// Used by the portable probes to find `.dll` / `.so` framework markers
+    /// whether bundled or system-linked.
     pub(crate) fn has_library(&self, needle: &str) -> bool {
         let needle = needle.to_ascii_lowercase();
         // The import table (DT_NEEDED / PE imports) is the reliable signal and
@@ -244,20 +240,15 @@ impl Layout {
     }
 
     /// Lower-cased basenames of imported / needed libraries. Cached.
-    #[allow(dead_code)] // used by the non-macOS probes via `has_library`
     fn imports(&self) -> &[String] {
         self.imports.get_or_init(|| {
-            #[cfg(macos_layout)]
-            {
-                Vec::new()
+            if self.is_bundle() {
+                return Vec::new();
             }
-            #[cfg(not(macos_layout))]
-            {
-                self.executable
-                    .as_deref()
-                    .map(read_imports)
-                    .unwrap_or_default()
-            }
+            self.executable
+                .as_deref()
+                .map(read_imports)
+                .unwrap_or_default()
         })
     }
 }
@@ -289,9 +280,8 @@ fn is_system_dir(dir: &Path) -> bool {
 /// Read the dynamic libraries an executable imports (ELF `DT_NEEDED` on Linux,
 /// the PE import table on Windows), returning lower-cased basenames. Best
 /// effort: any parse failure yields an empty list.
-#[cfg(not(macos_layout))]
 fn read_imports(exe: &Path) -> Vec<String> {
-    let Ok(data) = std::fs::read(exe) else {
+    let Ok(data) = vfs::read(exe) else {
         return Vec::new();
     };
     let normalise = |lib: &str| {

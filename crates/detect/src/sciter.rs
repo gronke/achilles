@@ -22,8 +22,7 @@ static SCITER_VERSION_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"Sciter (\d+\.\d+\.\d+(?:\.\d+)?)").unwrap());
 
 pub fn detect(layout: &Layout) -> Result<Option<String>, crate::DetectError> {
-    #[cfg(macos_layout)]
-    {
+    if layout.is_bundle() {
         // Framework flavour — preferred because it's deterministic.
         let fw = layout.frameworks_dir().join("Sciter.framework");
         if vfs::is_dir(&fw) {
@@ -64,7 +63,6 @@ fn is_sciter_library(path: &Path) -> bool {
     name.ends_with(".dll") || name.contains(".so") || name.ends_with(".dylib")
 }
 
-#[cfg(macos_layout)]
 fn read_plist_version(plist_path: &Path) -> Option<String> {
     let value = crate::read_plist(plist_path)?;
     let dict = value.as_dictionary()?;

@@ -8,14 +8,12 @@ authors.workspace = true
 repository.workspace = true
 description = "Detect Electron / Tauri frameworks and their runtime versions across macOS, Windows, and Linux apps"
 
-[features]
-# Use the macOS `.app` bundle layout for detection even when not building for
-# macOS (see build.rs -> `macos_layout` cfg). The wasm build enables this so an
-# uploaded `.app` is analysed with the bundle-layout probes (Info.plist +
-# Frameworks) instead of the portable import-table path.
-macos-bundle = []
-
 [dependencies]
+# Both layouts (macOS `.app` bundle and the portable import-table path) are
+# always compiled; `vfs::platform()` picks between them at run time. It's a
+# compile-time constant on the desktop, so the unused arm folds away — but on
+# wasm the browser may be handed any of the three, so both must be present.
+goblin.workspace = true
 memchr.workspace = true
 plist.workspace = true
 regex.workspace = true
@@ -28,16 +26,16 @@ vfs.workspace = true
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 memmap2.workspace = true
 
-# Windows / Linux read framework markers from the binary's import table and PE
-# version resources; macOS (and the wasm bundle build) rely on `.app` bundle
-# layout + Info.plist instead, so the import-table path (and goblin) is excluded
-# there.
-[target.'cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))'.dependencies]
-goblin.workspace = true
-
+# PE version resources are only ever read on a real Windows host or in the
+# browser (which may be handed a Windows app), so macOS / Linux desktop builds
+# skip `pelite`. wasm takes it without the `mmap` feature — that pulls in
+# libc/winapi, neither of which exists there — and reads bytes via `vfs`.
 [target.'cfg(target_os = "windows")'.dependencies]
-pelite.workspace = true
+pelite = { workspace = true, features = ["mmap"] }
 winreg.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+pelite = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
 serde_json.workspace = true
