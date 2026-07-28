@@ -511,7 +511,7 @@ function installWebShim() {
   async function webScan() {
     setStatus(
       window.showDirectoryPicker
-        ? `Click ‘Open’ to pick a folder (e.g. /Applications), or ‘archive…’ for ${SUPPORTED_FILES}.`
+        ? `Click ‘Open folder’ to pick one (e.g. /Applications), or ‘Open file…’ for ${SUPPORTED_FILES}.`
         : `Click ‘Open’ to choose ${SUPPORTED_FILES}.`,
     );
   }
@@ -723,13 +723,15 @@ function installWebShim() {
       fileInput.value = "";
     });
 
-    // One capability-aware "Open": the directory picker where the browser has
+    // Capability-aware ingestion: the directory picker where the browser has
     // one (a `.app` bundle is itself a directory, so that covers single apps
-    // too), the plain file picker everywhere else.
+    // too), the plain file picker everywhere else. A directory picker can't
+    // select files, so browsers that got one carry a second button for
+    // zipped .apps / bare asars — the labels explain the split themselves.
     const openBtn = document.createElement("button");
     openBtn.type = "button";
-    openBtn.textContent = "Open";
     if (window.showDirectoryPicker) {
+      openBtn.textContent = "Open folder";
       openBtn.title =
         "Pick a folder: /Applications scans every .app in it, any other folder " +
         "(a Windows install directory, a Linux app tree, one .app) is scanned as a single app";
@@ -739,18 +741,18 @@ function installWebShim() {
         });
       });
     } else {
+      openBtn.textContent = "Open";
       openBtn.title = `Choose ${SUPPORTED_FILES}`;
       openBtn.addEventListener("click", () => fileInput.click());
     }
     header.insertBefore(openBtn, anchor);
 
     // A directory picker can't select files, so browsers that got one keep a
-    // quiet secondary control for single-file uploads.
+    // second button for single-file uploads.
     if (window.showDirectoryPicker) {
       const archiveBtn = document.createElement("button");
       archiveBtn.type = "button";
-      archiveBtn.className = "btn-quiet";
-      archiveBtn.textContent = "archive…";
+      archiveBtn.textContent = "Open file…";
       archiveBtn.title = `Select ${SUPPORTED_FILES}`;
       archiveBtn.addEventListener("click", () => fileInput.click());
       header.insertBefore(archiveBtn, anchor);
