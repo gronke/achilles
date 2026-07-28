@@ -27,13 +27,13 @@ wasm-pack build "$root/crates/achilles-wasm" --release --no-typescript --target 
 "$root/scripts/frontend-build.sh" "$out"
 
 # Precache manifest for sw.js: every built file except the EUVD snapshot (owned
-# by the dedicated achilles-euvd-* cache), the build marker, and the manifest
-# itself.
+# by the dedicated achilles-euvd-* cache), dotfiles (the build marker, the
+# vendor cache's .version markers), and the manifest itself.
 (
   cd "$out"
   find . -type f \
     ! -path './euvd/*' \
-    ! -name '.web-modules-out' \
+    ! -name '.*' \
     ! -name 'sw-manifest.json' \
     | sort | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin]))'
 ) >"$out/sw-manifest.json"
