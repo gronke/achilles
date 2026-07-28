@@ -11,11 +11,19 @@
 //! literal strings in the binary (and its import table), so most of the work is
 //! shared. The per-OS specifics are hidden behind an internal `Layout`.
 //!
+//! Which convention applies is [`vfs::platform`]: the host OS on the desktop
+//! (a compile-time constant, so the unused arms fold away), and on wasm the
+//! platform of whatever the browser was handed — an uploaded `.app`, a Windows
+//! install directory, or a Linux app tree. Every probe therefore keeps both
+//! paths compiled and picks between them at run time.
+//!
 //! The detector never panics and prefers partial results over errors: if a
 //! path is malformed or a binary can't be read, the affected fields are left
 //! `None` and the [`Confidence`] downgraded.
 
 use std::path::{Path, PathBuf};
+
+pub use vfs::Platform;
 
 mod app;
 mod bundle;
@@ -29,7 +37,6 @@ mod metadata;
 mod nwjs;
 mod qt;
 mod react_native;
-#[cfg(target_os = "macos")]
 mod safari;
 mod sciter;
 mod strings;
@@ -44,8 +51,6 @@ pub use bundle::BundleInfo;
 /// Read and parse a property list through [`vfs`] (so it works against the real
 /// filesystem on native and the in-memory upload tree on wasm). Returns `None`
 /// if the file is missing or malformed — callers degrade to partial results.
-/// Only the macOS bundle-layout probes read plists, hence the gate.
-#[cfg(macos_layout)]
 pub(crate) fn read_plist(path: &std::path::Path) -> Option<plist::Value> {
     plist::Value::from_reader(std::io::Cursor::new(vfs::read(path).ok()?)).ok()
 }
@@ -214,9 +219,9 @@ pub fn detect_app(app: &DiscoveredApp) -> Result<Detection, DetectError> {
     // which has no runtime markers; redirect to the real versioned app dir so
     // probes (and downstream audits, via `Detection.root`/`executable`) see it.
     // `app.path` is preserved as the stable identity.
-    #[cfg(target_os = "windows")]
-    let redirected = app::redirect_squirrel_stub(app);
-    #[cfg(target_os = "windows")]
+    let redirected = (vfs::platform() == Platform::Windows)
+        .then(|| app::redirect_squirrel_stub(app))
+        .flatten();
     let app = redirected.as_ref().unwrap_or(app);
 
     let bundle = metadata::read(app);
@@ -412,9 +417,8 @@ pub fn detect_app(app: &DiscoveredApp) -> Result<Detection, DetectError> {
         ));
     }
 
-    // Safari itself — a deterministic bundle-id check. macOS only; no Safari
-    // ships on Windows / Linux.
-    #[cfg(target_os = "macos")]
+    // Safari itself — a deterministic bundle-id check. Bundle layout only; no
+    // Safari ships on Windows / Linux.
     if let Some(safari_version) = safari::detect_app(bundle.bundle_id.as_deref(), &layout.root) {
         let mut versions = extra_versions.clone();
         versions.webkit = Some(safari_version);

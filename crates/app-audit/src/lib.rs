@@ -13,32 +13,32 @@
 //!   flatpak/snap apps, the declared sandbox permissions.
 //!
 //! ASAR integrity is reported on every platform for Electron apps.
+//!
+//! Which backend runs is [`vfs::platform`]: the host OS on the desktop (a
+//! compile-time constant, so the other two fold away), and on wasm the platform
+//! of whatever the browser was handed. All three are therefore always compiled.
+//! The few facts that genuinely need the host OS — `codesign`'s authority chain,
+//! `WinVerifyTrust`'s verdict — degrade to `None` with a note elsewhere.
 
 use std::path::{Path, PathBuf};
 
+use vfs::Platform;
+
 mod asar;
-#[cfg(all(target_os = "linux", not(macos_layout)))]
 mod linux;
-#[cfg(macos_layout)]
 mod macos;
-#[cfg(all(target_os = "windows", not(macos_layout)))]
 mod windows;
 
 pub use asar::{AsarInfo, AsarIntegrityCheck};
-
-#[cfg(all(target_os = "linux", not(macos_layout)))]
 pub use linux::{ElfHardening, LinuxAudit, RelroKind, SandboxInfo};
-#[cfg(macos_layout)]
 pub use macos::{CodeSignature, Entitlements, InfoPlistFlags, MacosAudit, TlsException};
+pub use windows::{PeHardening, WindowsAudit, WindowsManifest, WindowsSignature};
 
 /// Read and parse a property list through [`vfs`] (real fs on native, the
 /// in-memory upload tree on wasm). `None` if missing or malformed.
-#[cfg(macos_layout)]
 pub(crate) fn read_plist(path: &Path) -> Option<plist::Value> {
     plist::Value::from_reader(std::io::Cursor::new(vfs::read(path).ok()?)).ok()
 }
-#[cfg(all(target_os = "windows", not(macos_layout)))]
-pub use windows::{PeHardening, WindowsAudit, WindowsManifest, WindowsSignature};
 
 /// Platform-tagged audit result. Each variant flattens its fields alongside a
 /// `"platform"` discriminant in JSON, so the frontend branches on
@@ -46,14 +46,9 @@ pub use windows::{PeHardening, WindowsAudit, WindowsManifest, WindowsSignature};
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "platform", rename_all = "lowercase")]
 pub enum AppAudit {
-    #[cfg(macos_layout)]
     Macos(MacosAudit),
-    #[cfg(all(target_os = "windows", not(macos_layout)))]
     Windows(WindowsAudit),
-    #[cfg(all(target_os = "linux", not(macos_layout)))]
     Linux(LinuxAudit),
-    /// A platform with no native audit backend in this build.
-    Unsupported { path: PathBuf },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -77,24 +72,9 @@ pub async fn audit(
         return Err(AuditError::NotFound(path.to_path_buf()));
     }
 
-    #[cfg(macos_layout)]
-    {
-        let _ = (root, executable);
-        Ok(AppAudit::Macos(macos::audit(path).await))
-    }
-    #[cfg(all(target_os = "windows", not(macos_layout)))]
-    {
-        Ok(AppAudit::Windows(windows::audit(path, root, executable)))
-    }
-    #[cfg(all(target_os = "linux", not(macos_layout)))]
-    {
-        Ok(AppAudit::Linux(linux::audit(path, root, executable)))
-    }
-    #[cfg(not(any(macos_layout, target_os = "windows", target_os = "linux")))]
-    {
-        let _ = (root, executable);
-        Ok(AppAudit::Unsupported {
-            path: path.to_path_buf(),
-        })
-    }
+    Ok(match vfs::platform() {
+        Platform::Macos => AppAudit::Macos(macos::audit(path).await),
+        Platform::Windows => AppAudit::Windows(windows::audit(path, root, executable)),
+        Platform::Linux => AppAudit::Linux(linux::audit(path, root, executable)),
+    })
 }

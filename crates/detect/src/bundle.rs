@@ -1,8 +1,6 @@
 //! Parse the top-level `Contents/Info.plist` of a macOS bundle.
 
-#[cfg(macos_layout)]
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The subset of `Contents/Info.plist` we care about.
 #[derive(Debug, Clone, Default)]
@@ -17,9 +15,8 @@ pub struct BundleInfo {
 
 /// Read and parse `Contents/Info.plist`. Missing or malformed plists return
 /// [`BundleInfo::default`] rather than erroring — we want the scanner to keep
-/// going. macOS-only: the other platforms fill [`BundleInfo`] from PE version
-/// resources / `.desktop` entries (see [`crate::metadata`]).
-#[cfg(macos_layout)]
+/// going. Bundle layout only: the other platforms fill [`BundleInfo`] from PE
+/// version resources / `.desktop` entries (see [`crate::metadata`]).
 pub fn read(app_path: &Path) -> BundleInfo {
     let plist_path = app_path.join("Contents/Info.plist");
     let Some(value) = crate::read_plist(&plist_path) else {

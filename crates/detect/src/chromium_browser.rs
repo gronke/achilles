@@ -21,7 +21,6 @@ pub struct Detection {
 
 /// Known Chromium-browser executable basenames (lower-cased, without the
 /// platform `.exe` suffix).
-#[allow(dead_code)] // matched by the non-macOS browser probe
 const BROWSER_BINARIES: &[&str] = &[
     "chrome",
     "msedge",
@@ -36,40 +35,36 @@ const BROWSER_BINARIES: &[&str] = &[
 ];
 
 pub fn detect(layout: &Layout) -> Option<Detection> {
-    #[cfg(macos_layout)]
-    {
-        macos::detect(layout)
+    if layout.is_bundle() {
+        return macos::detect(layout);
     }
-    #[cfg(not(macos_layout))]
-    {
-        let exe = layout.executable.as_deref()?;
-        let stem = exe
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_ascii_lowercase())?;
-        if !BROWSER_BINARIES.contains(&stem.as_str()) {
-            return None;
-        }
-        // Corroborate with Chromium support files so we don't flag an unrelated
-        // binary that merely shares a name. Chrome ships `chrome_NNN_percent.pak`
-        // rather than `resources.pak`, so accept any `.pak` plus `icudtl.dat`.
-        if !has_chromium_support(&layout.root) {
-            return None;
-        }
-        let chromium_version = crate::strings::scan_electron_versions(exe)
-            .ok()
-            .and_then(|(chromium, _)| chromium);
-        Some(Detection { chromium_version })
+
+    let exe = layout.executable.as_deref()?;
+    let stem = exe
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_ascii_lowercase())?;
+    if !BROWSER_BINARIES.contains(&stem.as_str()) {
+        return None;
     }
+    // Corroborate with Chromium support files so we don't flag an unrelated
+    // binary that merely shares a name. Chrome ships `chrome_NNN_percent.pak`
+    // rather than `resources.pak`, so accept any `.pak` plus `icudtl.dat`.
+    if !has_chromium_support(&layout.root) {
+        return None;
+    }
+    let chromium_version = crate::strings::scan_electron_versions(exe)
+        .ok()
+        .and_then(|(chromium, _)| chromium);
+    Some(Detection { chromium_version })
 }
 
 /// True if `dir` contains Chromium runtime support files (`icudtl.dat` or any
 /// `.pak`).
-#[cfg(not(macos_layout))]
 fn has_chromium_support(dir: &std::path::Path) -> bool {
-    if dir.join("icudtl.dat").exists() {
+    if vfs::exists(dir.join("icudtl.dat")) {
         return true;
     }
-    if let Ok(entries) = std::fs::read_dir(dir) {
+    if let Ok(entries) = vfs::read_dir(dir) {
         for entry in entries.flatten() {
             if entry
                 .path()
@@ -84,7 +79,6 @@ fn has_chromium_support(dir: &std::path::Path) -> bool {
     false
 }
 
-#[cfg(macos_layout)]
 mod macos {
     use std::path::Path;
 

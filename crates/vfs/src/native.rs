@@ -19,6 +19,18 @@ pub fn read_to_string(path: impl AsRef<Path>) -> io::Result<String> {
     std::fs::read_to_string(path)
 }
 
+/// Read at most the first `len` bytes of `path` — enough for a magic-number
+/// check without pulling a 200 MB binary into memory.
+pub fn read_prefix(path: impl AsRef<Path>, len: usize) -> io::Result<Vec<u8>> {
+    use std::io::Read;
+
+    let mut buf = Vec::with_capacity(len);
+    std::fs::File::open(path)?
+        .take(len as u64)
+        .read_to_end(&mut buf)?;
+    Ok(buf)
+}
+
 #[inline]
 pub fn read_dir(path: impl AsRef<Path>) -> io::Result<ReadDir> {
     std::fs::read_dir(path)

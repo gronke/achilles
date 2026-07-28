@@ -24,13 +24,14 @@ pub fn detect(layout: &Layout) -> Option<Detection> {
     let root = &layout.root;
 
     // Platform-conventional fixed `release` locations.
-    #[cfg(macos_layout)]
-    let fixed: &[&str] = &[
-        "Contents/Runtime/Contents/Home/release",
-        "Contents/Resources/Java/jre/release",
-    ];
-    #[cfg(not(macos_layout))]
-    let fixed: &[&str] = &["runtime/release", "jre/release", "lib/runtime/release"];
+    let fixed: &[&str] = if layout.is_bundle() {
+        &[
+            "Contents/Runtime/Contents/Home/release",
+            "Contents/Resources/Java/jre/release",
+        ]
+    } else {
+        &["runtime/release", "jre/release", "lib/runtime/release"]
+    };
 
     for rel in fixed {
         if let Some(v) = parse_release_file(&root.join(rel)) {
@@ -39,8 +40,7 @@ pub fn detect(layout: &Layout) -> Option<Detection> {
     }
 
     // macOS also stashes JREs under `Contents/PlugIns/*.jdk` / `jre`.
-    #[cfg(macos_layout)]
-    {
+    if layout.is_bundle() {
         let plugins = root.join("Contents/PlugIns");
         if let Ok(entries) = vfs::read_dir(&plugins) {
             for entry in entries.flatten() {

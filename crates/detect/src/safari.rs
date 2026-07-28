@@ -16,19 +16,23 @@
 //! anyway).
 
 use std::path::Path;
+#[cfg(target_os = "macos")]
 use std::sync::OnceLock;
 
 /// Cache the system Safari version per process — it never changes during a
 /// scan, and hitting the filesystem once per bundle would be wasteful.
+#[cfg(target_os = "macos")]
 static SYSTEM_WEBKIT: OnceLock<Option<String>> = OnceLock::new();
 
+#[cfg(target_os = "macos")]
 const SYSTEM_SAFARI_PATHS: &[&str] = &[
     "/Applications/Safari.app",
     "/System/Applications/Safari.app",
     "/System/Volumes/Preboot/Cryptexes/App/System/Applications/Safari.app",
 ];
 
-/// Return `Some(version)` if this bundle *is* Safari.
+/// Return `Some(version)` if this bundle *is* Safari. Reads the bundle's own
+/// Info.plist through [`vfs`], so it works on an uploaded `Safari.app` too.
 pub fn detect_app(bundle_id: Option<&str>, app_path: &Path) -> Option<String> {
     if bundle_id != Some("com.apple.Safari") {
         return None;
@@ -37,13 +41,16 @@ pub fn detect_app(bundle_id: Option<&str>, app_path: &Path) -> Option<String> {
 }
 
 /// The effective WKWebView version on this machine — Safari's Info.plist
-/// `CFBundleShortVersionString`. Memoised for the process lifetime.
+/// `CFBundleShortVersionString`. Memoised for the process lifetime. Probes the
+/// *host* filesystem, so it only means anything on a real macOS machine.
+#[cfg(target_os = "macos")]
 pub fn system_webkit_version() -> Option<String> {
     SYSTEM_WEBKIT
         .get_or_init(locate_system_safari_version)
         .clone()
 }
 
+#[cfg(target_os = "macos")]
 fn locate_system_safari_version() -> Option<String> {
     for candidate in SYSTEM_SAFARI_PATHS {
         let path = Path::new(candidate);
@@ -58,8 +65,7 @@ fn locate_system_safari_version() -> Option<String> {
 }
 
 fn read_bundle_version(app_path: &Path) -> Option<String> {
-    let plist_path = app_path.join("Contents/Info.plist");
-    let value = plist::Value::from_file(&plist_path).ok()?;
+    let value = crate::read_plist(&app_path.join("Contents/Info.plist"))?;
     let dict = value.as_dictionary()?;
     dict.get("CFBundleShortVersionString")
         .or_else(|| dict.get("CFBundleVersion"))

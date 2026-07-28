@@ -17,6 +17,13 @@
 //! * [`is_file`] / [`is_dir`] / [`exists`] follow symlinks (like `Path::*`).
 //! * [`DirEntry::file_type`] does *not* follow symlinks (like `std::fs`).
 //! * [`metadata`] follows symlinks.
+//!
+//! Alongside the tree, `vfs` carries the [`Platform`] whose application layout
+//! the analysis should assume — the host OS on native, and whatever the browser
+//! was handed on wasm. See [`platform`].
+
+mod platform;
+pub use platform::*;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;

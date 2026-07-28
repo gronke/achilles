@@ -21,17 +21,13 @@ pub struct Detection {
 }
 
 pub fn detect(layout: &Layout) -> Result<Option<Detection>, crate::DetectError> {
-    #[cfg(macos_layout)]
-    {
+    if layout.is_bundle() {
         macos::detect(layout)
-    }
-    #[cfg(not(macos_layout))]
-    {
+    } else {
         portable::detect(layout)
     }
 }
 
-#[cfg(not(macos_layout))]
 mod portable {
     use super::*;
 
@@ -41,12 +37,12 @@ mod portable {
         let resources = layout.resources_dir();
         let has_asar = ["app.asar", "electron.asar", "default_app.asar"]
             .iter()
-            .any(|f| resources.join(f).is_file())
-            || resources.join("app").join("package.json").is_file()
-            || layout.root.join("node_modules.asar").is_file();
+            .any(|f| vfs::is_file(resources.join(f)))
+            || vfs::is_file(resources.join("app").join("package.json"))
+            || vfs::is_file(layout.root.join("node_modules.asar"));
 
         let (electron, chromium, node) = match layout.executable.as_deref() {
-            Some(exe) if exe.exists() => {
+            Some(exe) if vfs::exists(exe) => {
                 let electron = strings::scan_electron_version(exe).map_err(io_err(exe))?;
                 let (chromium, node) = strings::scan_electron_versions(exe).map_err(io_err(exe))?;
                 (electron, chromium, node)
@@ -87,7 +83,6 @@ mod portable {
     }
 }
 
-#[cfg(macos_layout)]
 mod macos {
     use std::path::{Path, PathBuf};
 

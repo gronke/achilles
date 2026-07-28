@@ -435,9 +435,69 @@ function installWebShim() {
 
   // ---- scanning: File System Access (Chromium) or a selected file (any browser) --
 
+  // What a single upload may be. Achilles reads macOS, Windows, and Linux apps
+  // alike — the wasm side infers which from the tree — so the accepted shapes
+  // are "an app folder", "a zip of one", or "a lone binary".
+  const SUPPORTED_FILES =
+    "a zipped app (.zip), a Windows .exe, a Linux executable, or an app.asar";
+  const SUPPORTED_DROP = `an app folder (.app / a Windows or Linux app directory), ${SUPPORTED_FILES}`;
+  // Extensions we accept as a single-file upload.
+  const FILE_RE = /\.(zip|asar|exe)$/i;
+  // …but a Linux app binary carries no extension at all, so an extension-less
+  // file is a candidate too. The wasm side reads its magic and rejects it with
+  // a specific message if it turns out not to be an app, so guessing generously
+  // here costs nothing and is the only way those uploads are reachable.
+  const isUploadCandidate = (name) => FILE_RE.test(name) || !/\.[^.\\/]+$/.test(name);
+
   function setStatus(text) {
     const el = document.querySelector("#status");
     if (el) el.textContent = text;
+  }
+
+  // ---- which OS's layout to read an upload as ---------------------------
+  // The wasm side sniffs this from the tree, but the markers aren't always
+  // decisive — a Linux app that ships .NET assemblies looks like a Windows
+  // install, and a sniff that guesses wrong then finds no executable at all.
+  // This is the escape hatch: force the layout and scan again.
+  const PLATFORM_LABELS = { macos: "macOS", windows: "Windows", linux: "Linux" };
+  /** `""` means "let the wasm side sniff it". */
+  let forcedPlatform = "";
+  /** The wasm bindings take `Option<String>`, so absent must be `undefined`. */
+  const platformArg = () => forcedPlatform || undefined;
+  const platformLabel = (p) => PLATFORM_LABELS[p] ?? p;
+
+  /**
+   * Final status line for a scan, replacing main.js's plain "done: N".
+   *
+   * Reports the layout each app was read as whenever it was inferred rather
+   * than chosen, so a wrong guess is visible instead of silently producing an
+   * empty row — and points at the control that fixes it.
+   *
+   * @param count   apps that produced a row
+   * @param used    Set of platform names the wasm side reported
+   * @param empty   names that held no application
+   * @param failed  error messages, one per upload that threw
+   */
+  function reportScan(count, used, empty, failed) {
+    const problems = empty.length
+      ? [`no application found in ${empty.join(", ")}`, ...failed]
+      : [...failed];
+    const read = [...used].map(platformLabel).join(", ");
+
+    if (!problems.length) {
+      if (!forcedPlatform && read) {
+        setStatus(`done: ${count} app${count === 1 ? "" : "s"} — read as ${read}`);
+      }
+      return;
+    }
+    const done = count ? `done: ${count} app${count === 1 ? "" : "s"}. ` : "";
+    // Only "found nothing app-shaped" points at a bad sniff. A file we couldn't
+    // read at all already carries its own explanation from the wasm side.
+    const hint =
+      empty.length && !forcedPlatform
+        ? " — if that's the wrong OS layout, choose it under ‘Read as’ and scan again"
+        : "";
+    setStatus(`${done}${problems.join("; ")}${hint}`);
   }
 
   // `scan` is fired both on boot (no user gesture) and from the Rescan button
@@ -457,9 +517,80 @@ function installWebShim() {
     }
     setStatus(
       window.showDirectoryPicker
-        ? "Click ‘Scan folder’ to choose a directory, or ‘Select file’ for a .app / .asar."
-        : "Click ‘Select file’ to choose a .app (zipped) or app.asar — your browser has no folder picker.",
+        ? `Click ‘Scan folder’ to choose a directory, or ‘Select file’ for ${SUPPORTED_FILES}.`
+        : `Click ‘Select file’ to choose ${SUPPORTED_FILES} — your browser has no folder picker.`,
     );
+  }
+
+  // A picked folder is read as one of two things: a *container* of macOS `.app`
+  // bundles (/Applications), or a single application root. Windows and Linux
+  // apps are just a directory of files with no naming convention to key on, so
+  // there's nothing to enumerate — the folder itself is the app. The wasm side
+  // works out which platform's layout it follows from the files inside.
+  function appsInPickedDirectory(dir, childBundles) {
+    if (dir.name.endsWith(".app") || childBundles.length === 0) return [dir];
+    return childBundles;
+  }
+
+  // ---- ingest budget ----------------------------------------------------
+  // Everything the analysis reads is copied into wasm's linear memory, which
+  // tops out at 4 GB — and an allocation that fails there aborts the whole
+  // module rather than raising a catchable error, taking every later scan with
+  // it until the page reloads. Since "the folder itself is the app" now accepts
+  // any directory, a mis-pick can be a source tree or a 20 GB build directory,
+  // so measure before ingesting: file handles carry `.size` without reading a
+  // byte, which makes refusing one of those cost a directory walk instead of an
+  // out-of-memory abort.
+  //
+  // The ceiling is far above any real desktop app (the biggest Electron apps
+  // land around 600 MB) and far below where wasm gets into trouble — the tree
+  // is not the only claim on that memory, since each binary the analysis parses
+  // is cloned out of it. The file cap is not about memory but about bounding
+  // the walk itself; an app with unpacked `node_modules` can hold tens of
+  // thousands of files legitimately, so it sits well clear of that.
+  const MAX_APP_BYTES = 2 * 1024 ** 3;
+  const MAX_APP_FILES = 50_000;
+
+  function tooLargeMessage(name, overflow) {
+    const limit =
+      overflow === "count"
+        ? `more than ${MAX_APP_FILES.toLocaleString()} files`
+        : `more than ${MAX_APP_BYTES / 1024 ** 3} GB`;
+    return (
+      `${name} holds ${limit} — too much for the browser to load. Pick the ` +
+      `folder holding the app's own executable rather than a parent directory.`
+    );
+  }
+
+  /**
+   * Walk one app directory and collect a `File` per entry. Only metadata is
+   * touched here — `getFile()` does not read contents — so the budget is
+   * checked before anything is pulled into memory. Stops at the first entry
+   * that breaks it and reports which limit was hit.
+   *
+   * @returns `{ files: [{ path, file }], overflow: null | "size" | "count" }`
+   */
+  async function collectAppFiles(dirHandle, basePath) {
+    const files = [];
+    let bytes = 0;
+    let overflow = null;
+    const walk = async (handle, base) => {
+      for await (const [name, child] of handle.entries()) {
+        if (overflow) return;
+        const path = `${base}/${name}`;
+        if (child.kind === "directory") {
+          await walk(child, path);
+        } else {
+          const file = await child.getFile();
+          bytes += file.size;
+          files.push({ path, file });
+          if (files.length > MAX_APP_FILES) overflow = "count";
+          else if (bytes > MAX_APP_BYTES) overflow = "size";
+        }
+      }
+    };
+    await walk(dirHandle, basePath);
+    return { files, overflow };
   }
 
   async function scanViaDirectoryPicker() {
@@ -467,67 +598,80 @@ function installWebShim() {
     if (!wasm) return setStatus(WASM_UNAVAILABLE);
     const dir = await window.showDirectoryPicker({ mode: "read" });
 
-    // Either the picked directory *is* a `.app`, or it contains `.app`s.
-    let apps;
-    if (dir.name.endsWith(".app")) {
-      apps = [dir];
-    } else {
-      apps = [];
+    const bundles = [];
+    if (!dir.name.endsWith(".app")) {
       for await (const [name, handle] of dir.entries()) {
-        if (handle.kind === "directory" && name.endsWith(".app")) apps.push(handle);
+        if (handle.kind === "directory" && name.endsWith(".app")) bundles.push(handle);
       }
     }
+    const apps = appsInPickedDirectory(dir, bundles);
 
-    if (apps.length === 0) {
-      setStatus(`No .app bundles found in ${dir.name}.`);
-    }
     emit("scan_event", { event: "started", total: apps.length });
     let count = 0;
+    const used = new Set();
+    const empty = [];
+    const failed = [];
     for (const appHandle of apps) {
       try {
         const root = `/scan/${appHandle.name}`;
-        const analyzer = new wasm.Analyzer(root);
-        await addDirToAnalyzer(appHandle, root, analyzer);
+        setStatus(`reading ${appHandle.name}…`);
+        const { files, overflow } = await collectAppFiles(appHandle, root);
+        if (overflow) {
+          failed.push(tooLargeMessage(appHandle.name, overflow));
+          continue;
+        }
+        const analyzer = new wasm.Analyzer(root, platformArg());
+        for (const { path, file } of files) {
+          analyzer.add_file(path, new Uint8Array(await file.arrayBuffer()));
+        }
         const result = JSON.parse(analyzer.finish());
+        if (result.platform) used.add(result.platform);
         const det = cacheResult(result, appHandle.name);
-        if (det) emit("scan_event", { event: "detected", ...det });
-        count++;
+        if (det) {
+          emit("scan_event", { event: "detected", ...det });
+          count++;
+        } else {
+          // Nothing app-shaped in there — a Windows or Linux folder only
+          // announces itself as an app by the binary inside it, so this is
+          // only knowable after reading it. Report it instead of listing a row.
+          empty.push(appHandle.name);
+        }
       } catch (e) {
         console.warn("failed to analyse", appHandle.name, e);
+        failed.push(`${appHandle.name}: ${e?.message ?? e}`);
         emit("scan_event", { event: "error", message: String(e) });
       }
     }
     emit("scan_event", { event: "finished", count });
-  }
-
-  // Recursively read every file of one `.app` into the streaming Analyzer.
-  async function addDirToAnalyzer(dirHandle, basePath, analyzer) {
-    for await (const [name, handle] of dirHandle.entries()) {
-      const path = `${basePath}/${name}`;
-      if (handle.kind === "directory") {
-        await addDirToAnalyzer(handle, path, analyzer);
-      } else {
-        const file = await handle.getFile();
-        analyzer.add_file(path, new Uint8Array(await file.arrayBuffer()));
-      }
-    }
+    reportScan(count, used, empty, failed);
   }
 
   async function scanViaFile(file) {
     await ready;
     if (!wasm) return setStatus(WASM_UNAVAILABLE);
+    if (file.size > MAX_APP_BYTES) return setStatus(tooLargeMessage(file.name, "size"));
     setStatus(`analysing ${file.name}…`);
     emit("scan_event", { event: "started", total: 1 });
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
-      const result = JSON.parse(wasm.analyze_app(bytes, file.name));
+      const result = JSON.parse(wasm.analyze_app(bytes, file.name, platformArg()));
       const det = cacheResult(result, file.name);
       if (det) emit("scan_event", { event: "detected", ...det });
-      emit("scan_event", { event: "finished", count: 1 });
+      emit("scan_event", { event: "finished", count: det ? 1 : 0 });
+      reportScan(
+        det ? 1 : 0,
+        new Set(result.platform ? [result.platform] : []),
+        det ? [] : [file.name],
+        [],
+      );
     } catch (e) {
       console.warn("failed to analyse file", e);
       emit("scan_event", { event: "error", message: String(e) });
       emit("scan_event", { event: "finished", count: 0 });
+      // The wasm side names what it couldn't read (an unrecognised file, a
+      // Mach-O, a broken zip); that message is the whole answer, so show it
+      // rather than sending the user to the console.
+      reportScan(0, new Set(), [], [`${file.name}: ${e?.message ?? e}`]);
     }
   }
 
@@ -541,7 +685,9 @@ function installWebShim() {
       const scanBtn = document.createElement("button");
       scanBtn.type = "button";
       scanBtn.textContent = "Scan folder";
-      scanBtn.title = "Pick a folder (e.g. /Applications) and scan the .app bundles in it";
+      scanBtn.title =
+        "Pick a folder: /Applications scans every .app in it, any other folder " +
+        "(a Windows install directory, a Linux app tree, one .app) is scanned as a single app";
       scanBtn.addEventListener("click", () => {
         void scanViaDirectoryPicker().catch((e) => {
           if (e?.name !== "AbortError") setStatus(`scan failed: ${e}`);
@@ -550,9 +696,45 @@ function installWebShim() {
       header.insertBefore(scanBtn, anchor);
     }
 
+    // `<select>` gets no styling from styles.css (the desktop build has none),
+    // so match the header buttons here.
+    const style = document.createElement("style");
+    style.textContent = `
+      #achilles-platform {
+        background: var(--bg-3); color: var(--fg);
+        border: 1px solid transparent; border-radius: 4px;
+        padding: 4px 6px; font-size: 12px; font-family: inherit; cursor: pointer;
+      }
+      #achilles-platform:hover { border-color: var(--accent); }
+    `;
+    document.head.appendChild(style);
+
+    const platformSelect = document.createElement("select");
+    platformSelect.id = "achilles-platform";
+    platformSelect.title =
+      "Which OS's application layout to read uploads as. Auto-detect infers it " +
+      "from the files; choose one explicitly if it guesses wrong.";
+    for (const [value, label] of [
+      ["", "Auto-detect OS"],
+      ["macos", "Read as macOS"],
+      ["windows", "Read as Windows"],
+      ["linux", "Read as Linux"],
+    ]) {
+      const opt = document.createElement("option");
+      opt.value = value;
+      opt.textContent = label;
+      platformSelect.appendChild(opt);
+    }
+    platformSelect.addEventListener("change", () => {
+      forcedPlatform = platformSelect.value;
+    });
+    header.insertBefore(platformSelect, anchor);
+
     const fileInput = document.createElement("input");
     fileInput.type = "file";
-    fileInput.accept = ".zip,.asar,application/zip";
+    // Deliberately unfiltered: a Linux app binary has no extension and no MIME
+    // type to name it, so any `accept` list would hide exactly the uploads that
+    // are hardest to arrive at another way. The wasm side does the rejecting.
     fileInput.style.display = "none";
     fileInput.id = "achilles-file-input";
     fileInput.addEventListener("change", () => {
@@ -563,7 +745,7 @@ function installWebShim() {
     const selectBtn = document.createElement("button");
     selectBtn.type = "button";
     selectBtn.textContent = "Select file";
-    selectBtn.title = "Select a .app (zipped) or a bare app.asar";
+    selectBtn.title = `Select ${SUPPORTED_FILES}`;
     selectBtn.addEventListener("click", () => fileInput.click());
     header.insertBefore(selectBtn, anchor);
     header.appendChild(fileInput);
@@ -571,8 +753,9 @@ function installWebShim() {
 
   // ---- drag-and-drop: a dashed-border overlay + folder/file dropzone ----
   // An inviting overlay appears while a file/folder is dragged over the page;
-  // on drop it scans a `.app` folder, a folder of `.app`s, a zipped `.app`, or
-  // a bare `app.asar`, and warns + refuses anything else.
+  // on drop it scans an app folder (a `.app`, a Windows install directory, a
+  // Linux app tree), a folder of `.app`s, a zip of any of those, a bare `.exe`
+  // or Linux executable, or a bare `app.asar`, and warns + refuses anything else.
   function injectDropzone() {
     if (document.querySelector("#achilles-dropzone")) return;
 
@@ -603,10 +786,9 @@ function installWebShim() {
 
     const msg = el.querySelector(".dz-msg");
     const sub = el.querySelector(".dz-sub");
-    const SUPPORTED = "a .app folder, a zipped .app (.zip), or an app.asar";
     function show(reject) {
       msg.textContent = reject ? "Unsupported" : "Drop to scan";
-      sub.textContent = reject ? `Need ${SUPPORTED}.` : SUPPORTED;
+      sub.textContent = reject ? `Need ${SUPPORTED_DROP}.` : SUPPORTED_DROP;
       el.classList.toggle("reject", !!reject);
       el.classList.add("show");
     }
@@ -666,24 +848,33 @@ function installWebShim() {
   function entryFile(entry) {
     return new Promise((resolve, reject) => entry.file(resolve, reject));
   }
-  // Collect one `.app` directory into { name, files: [{ path, file }] }, with
-  // `path` relative to the bundle root. The whole tree is walked up front,
-  // before any unrelated `await`, for the same Safari-invalidation reason.
+  // Collect one app directory into { name, files: [{ path, file }], overflow },
+  // with `path` relative to the app root. The whole tree is walked up front,
+  // before any unrelated `await`, for the same Safari-invalidation reason —
+  // and, as with the folder picker, only file metadata is touched, so a dropped
+  // build directory is refused on its size rather than loaded until wasm dies.
   async function collectApp(appEntry) {
     const files = [];
+    let bytes = 0;
+    let overflow = null;
     const walk = async (entry, rel) => {
+      if (overflow) return;
       if (entry.isDirectory) {
         for (const child of await readDirEntries(entry)) {
           await walk(child, `${rel}/${child.name}`);
         }
       } else {
-        files.push({ path: rel, file: await entryFile(entry) });
+        const file = await entryFile(entry);
+        bytes += file.size;
+        files.push({ path: rel, file });
+        if (files.length > MAX_APP_FILES) overflow = "count";
+        else if (bytes > MAX_APP_BYTES) overflow = "size";
       }
     };
     for (const child of await readDirEntries(appEntry)) {
       await walk(child, `/${child.name}`);
     }
-    return { name: appEntry.name, files };
+    return { name: appEntry.name, files, overflow };
   }
 
   async function handleDrop(entries, looseFiles, show, hide) {
@@ -697,27 +888,29 @@ function installWebShim() {
     // directory entries once the drop settles, so we must not `await` anything
     // slow (e.g. the wasm load) before walking them.
     const apps = []; // [{ name, files: [{ path, file }] }]
-    const files = []; // bare .zip / .asar File objects
+    const files = []; // bare .zip / .asar / .exe / extension-less File objects
     try {
       for (const entry of entries) {
         if (entry.isDirectory) {
-          if (entry.name.endsWith(".app")) {
-            apps.push(await collectApp(entry));
-          } else {
-            for (const child of await readDirEntries(entry)) {
-              if (child.isDirectory && child.name.endsWith(".app")) {
-                apps.push(await collectApp(child));
-              }
-            }
+          // Same rule as the folder picker: a folder of `.app`s is a container,
+          // anything else is one app (macOS, Windows, or Linux — the wasm side
+          // works out which from the files).
+          const bundles = entry.name.endsWith(".app")
+            ? []
+            : (await readDirEntries(entry)).filter(
+                (child) => child.isDirectory && child.name.endsWith(".app"),
+              );
+          for (const app of bundles.length ? bundles : [entry]) {
+            apps.push(await collectApp(app));
           }
-        } else if (/\.(zip|asar)$/i.test(entry.name)) {
+        } else if (isUploadCandidate(entry.name)) {
           files.push(await entryFile(entry));
         }
       }
       // Browsers without the Entries API only give us plain files.
       if (!entries.length) {
         for (const f of looseFiles) {
-          if (/\.(zip|asar)$/i.test(f.name)) files.push(f);
+          if (isUploadCandidate(f.name)) files.push(f);
         }
       }
     } catch (err) {
@@ -725,7 +918,7 @@ function installWebShim() {
       show(true);
       setStatus(
         "Couldn't read the dropped folder — Safari can't reliably read dropped " +
-        "directories. Zip the .app and drop (or ‘Select file’) the .zip instead.",
+        "directories. Zip the app folder and drop (or ‘Select file’) the .zip instead.",
       );
       setTimeout(hide, 4000);
       return;
@@ -733,7 +926,7 @@ function installWebShim() {
 
     if (apps.length + files.length === 0) {
       show(true); // unsupported — warn and refuse
-      setStatus("Unsupported drop — use a .app folder, a zipped .app, or an app.asar.");
+      setStatus(`Unsupported drop — use ${SUPPORTED_DROP}.`);
       setTimeout(hide, 2000);
       return;
     }
@@ -744,33 +937,61 @@ function installWebShim() {
 
     emit("scan_event", { event: "started", total: apps.length + files.length });
     let count = 0;
+    const used = new Set();
+    const empty = [];
+    const failed = [];
     for (const app of apps) {
       try {
+        if (app.overflow) {
+          failed.push(tooLargeMessage(app.name, app.overflow));
+          continue;
+        }
         const root = `/scan/${app.name}`;
-        const analyzer = new wasm.Analyzer(root);
+        const analyzer = new wasm.Analyzer(root, platformArg());
         for (const { path, file } of app.files) {
           analyzer.add_file(`${root}${path}`, new Uint8Array(await file.arrayBuffer()));
         }
-        const det = cacheResult(JSON.parse(analyzer.finish()), app.name);
-        if (det) emit("scan_event", { event: "detected", ...det });
-        count += 1;
+        const result = JSON.parse(analyzer.finish());
+        if (result.platform) used.add(result.platform);
+        const det = cacheResult(result, app.name);
+        if (det) {
+          emit("scan_event", { event: "detected", ...det });
+          count += 1;
+        } else {
+          empty.push(app.name); // held no application — reported below
+        }
       } catch (err) {
         console.warn("failed to analyse", app.name, err);
+        failed.push(`${app.name}: ${err?.message ?? err}`);
         emit("scan_event", { event: "error", message: String(err) });
       }
     }
     for (const file of files) {
       try {
+        if (file.size > MAX_APP_BYTES) {
+          failed.push(tooLargeMessage(file.name, "size"));
+          continue;
+        }
         const bytes = new Uint8Array(await file.arrayBuffer());
-        const det = cacheResult(JSON.parse(wasm.analyze_app(bytes, file.name)), file.name);
-        if (det) emit("scan_event", { event: "detected", ...det });
-        count += 1;
+        const result = JSON.parse(wasm.analyze_app(bytes, file.name, platformArg()));
+        if (result.platform) used.add(result.platform);
+        const det = cacheResult(result, file.name);
+        if (det) {
+          emit("scan_event", { event: "detected", ...det });
+          count += 1;
+        } else {
+          empty.push(file.name);
+        }
       } catch (err) {
+        // Includes the extension-less files we let through on the chance they
+        // were Linux binaries; the wasm side says exactly what it couldn't read.
         console.warn("failed to analyse file", err);
+        failed.push(`${file.name}: ${err?.message ?? err}`);
         emit("scan_event", { event: "error", message: String(err) });
       }
     }
     emit("scan_event", { event: "finished", count });
+    reportScan(count, used, empty, failed);
   }
 
   // ---- export: native save-dialog + writeTextFile → Blob download -------

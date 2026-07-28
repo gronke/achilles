@@ -12,8 +12,7 @@ use crate::app::Layout;
 
 /// Return the Flutter engine version string if this is a Flutter app.
 pub fn detect(layout: &Layout) -> Option<String> {
-    #[cfg(macos_layout)]
-    {
+    if layout.is_bundle() {
         let framework_dir = layout.frameworks_dir().join("FlutterMacOS.framework");
         if !vfs::is_dir(&framework_dir) {
             return None;
@@ -27,19 +26,16 @@ pub fn detect(layout: &Layout) -> Option<String> {
                 return Some(v);
             }
         }
-        Some("unknown".to_string())
+        return Some("unknown".to_string());
     }
-    #[cfg(not(macos_layout))]
-    {
-        if layout.has_library("flutter_windows") || layout.has_library("flutter_linux") {
-            Some("unknown".to_string())
-        } else {
-            None
-        }
+
+    if layout.has_library("flutter_windows") || layout.has_library("flutter_linux") {
+        Some("unknown".to_string())
+    } else {
+        None
     }
 }
 
-#[cfg(macos_layout)]
 fn read_version(plist_path: &std::path::Path) -> Option<String> {
     let value = crate::read_plist(plist_path)?;
     let dict = value.as_dictionary()?;

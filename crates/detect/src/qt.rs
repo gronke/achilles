@@ -20,17 +20,13 @@ pub struct Detection {
 }
 
 pub fn detect(layout: &Layout) -> Result<Option<Detection>, crate::DetectError> {
-    #[cfg(macos_layout)]
-    {
+    if layout.is_bundle() {
         macos::detect(layout)
-    }
-    #[cfg(not(macos_layout))]
-    {
+    } else {
         portable::detect(layout)
     }
 }
 
-#[cfg(not(macos_layout))]
 mod portable {
     use super::*;
     use std::sync::LazyLock;
@@ -64,7 +60,7 @@ mod portable {
     }
 
     fn scan_qt_version(lib: &std::path::Path) -> Option<String> {
-        let data = std::fs::read(lib).ok()?;
+        let data = vfs::read(lib).ok()?;
         QT_VERSION_RE
             .captures(&data)
             .and_then(|c| c.get(1))
@@ -73,7 +69,6 @@ mod portable {
     }
 }
 
-#[cfg(macos_layout)]
 mod macos {
     use std::path::Path;
 

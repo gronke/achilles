@@ -75,18 +75,10 @@ fn elf_hardening(exe: &Path) -> ElfHardening {
     use goblin::elf::dynamic::{DF_1_NOW, DF_BIND_NOW, DT_BIND_NOW, DT_FLAGS, DT_FLAGS_1};
     use goblin::elf::program_header::{PF_X, PT_GNU_RELRO, PT_GNU_STACK, PT_INTERP};
 
-    // mmap rather than read the whole file — these binaries can be 100s of MB
-    // (Electron), and goblin only touches the headers + symbol tables, so we
-    // avoid copying the entire executable into the heap.
-    let Ok(file) = std::fs::File::open(exe) else {
+    let Ok(bytes) = map_elf(exe) else {
         return ElfHardening::default();
     };
-    // SAFETY: read-only mapping; a concurrent modification could only skew the
-    // parsed flags, no worse than racing any other reader.
-    let Ok(mmap) = (unsafe { memmap2::Mmap::map(&file) }) else {
-        return ElfHardening::default();
-    };
-    let Ok(elf) = goblin::elf::Elf::parse(&mmap) else {
+    let Ok(elf) = goblin::elf::Elf::parse(&bytes) else {
         return ElfHardening::default();
     };
 
@@ -144,6 +136,23 @@ fn elf_hardening(exe: &Path) -> ElfHardening {
     }
 }
 
+/// Bytes for goblin to parse. Natively we mmap rather than read the whole file
+/// — these binaries can be 100s of MB (Electron), and goblin only touches the
+/// headers + symbol tables, so we avoid copying the executable into the heap.
+/// On wasm the upload already lives in memory, so `vfs` just hands it over.
+#[cfg(not(target_arch = "wasm32"))]
+fn map_elf(exe: &Path) -> std::io::Result<impl std::ops::Deref<Target = [u8]>> {
+    let file = std::fs::File::open(exe)?;
+    // SAFETY: read-only mapping; a concurrent modification could only skew the
+    // parsed flags, no worse than racing any other reader.
+    unsafe { memmap2::Mmap::map(&file) }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn map_elf(exe: &Path) -> std::io::Result<impl std::ops::Deref<Target = [u8]>> {
+    vfs::read(exe)
+}
+
 /// Detect a flatpak / snap sandbox by walking up from the app's files for a
 /// flatpak `metadata` file or a snap `meta/snap.yaml`, and extract the notable
 /// permissions.
@@ -155,7 +164,7 @@ fn detect_sandbox(root: &Path, executable: Option<&Path>) -> Option<SandboxInfo>
         // flatpak app trees carry a `metadata` file at `.../<id>/current/active/`.
         for anc in probe.ancestors() {
             let meta = anc.join("metadata");
-            if meta.is_file() {
+            if vfs::is_file(&meta) {
                 return parse_flatpak_metadata(&meta);
             }
         }
@@ -176,7 +185,7 @@ fn detect_sandbox(root: &Path, executable: Option<&Path>) -> Option<SandboxInfo>
 }
 
 fn parse_flatpak_metadata(meta: &Path) -> Option<SandboxInfo> {
-    let text = std::fs::read_to_string(meta).ok()?;
+    let text = vfs::read_to_string(meta).ok()?;
     let mut permissions = Vec::new();
     let mut in_context = false;
     for line in text.lines() {
