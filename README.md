@@ -78,9 +78,45 @@ deliberately avoids listing the pile of CLI tools a system ships with:
 - **Linux**: freedesktop `.desktop` entries (the application menu) — already
   GUI-only — resolved to their executables. Launcher shell-scripts in
   `/usr/bin` are followed to the real binary (so Chrome, VS Code, and the
-  shared `electronNN` runtimes resolve correctly).
+  shared `electronNN` runtimes resolve correctly). Packaged apps get two extra
+  steps, see below.
 - **Windows**: Start Menu `.lnk` shortcuts (a natural GUI filter) plus per-user
   `%LOCALAPPDATA%\Programs` installs, resolved to their target `.exe`.
+
+### Linux packages
+
+Most Linux apps don't install as a plain directory of files, and taking their
+launcher at face value gets you the wrong binary — or no binary at all:
+
+- **snap / flatpak** entries point at the *runner*, not the app
+  (`<snap mount>/bin/chromium` is a symlink to `/usr/bin/snap`; a flatpak entry
+  is `flatpak run com.spotify.Client`). Read literally, every snap on the
+  machine detects as the same Go binary. Discovery maps these to the payload
+  already unpacked on disk — `/snap/<name>/current` or
+  `/var/lib/snapd/snap/<name>/current` (Ubuntu uses the first, everyone else
+  the second), and `<install>/app/<id>/current/active/files` — then follows the
+  app's declared entry point to the binary behind it. That entry point is
+  almost always a launcher script naming its own files the way they appear
+  *inside* the sandbox, so the two indirections both runtimes use are resolved:
+  snap's `$SNAP` variable, and flatpak's `/app` mount point. No sandbox is
+  entered and nothing is executed.
+- **AppImages** are single files that often never register a menu entry at all,
+  so the usual download locations (`~/Applications`, `~/Downloads`,
+  `~/.local/bin`, …) are swept directly. The application inside one is a
+  compressed squashfs image, so the file's own bytes say nothing about it: the
+  payload is expanded once into `~/.cache/achilles/packages/` (keyed on path,
+  size, and mtime, so an updated AppImage re-expands) and every later scan
+  reuses that. Detection, the audit, and the static scan then read it like any
+  installed app.
+
+The browser build (`crates/achilles-wasm`) additionally accepts a package as an *upload* —
+`.AppImage`, `.snap`, `.deb`, `.rpm`, or a `.tar.{gz,xz,zst,bz2}` — and unpacks
+it in the page before running the same analysis. The readers live in
+`crates/pkg`: ar, tar, cpio, RPM headers, and squashfs, each written directly
+against the byte layout, with pure-Rust decompressors (miniz_oxide, lzma-rs,
+ruzstd, lz4_flex, bzip2-rs) so they link on `wasm32` where a C backend cannot.
+Nothing in a package is executed, and unpacking refuses paths that escape the
+destination.
 
 ## What it detects
 
@@ -224,7 +260,9 @@ For every discovered app it extracts:
   ├─ crates/netmon        passive TLS-handshake capture → crypto evidence
   ├─ crates/netmon-helper privileged (root) capture daemon, macOS (SMAppService)
   ├─ crates/cbom          crypto evidence → CycloneDX CBOM + PQC grading
-  └─ crates/rust-audit    cargo-auditable extraction + RustSec advisory match
+  ├─ crates/rust-audit    cargo-auditable extraction + RustSec advisory match
+  ├─ crates/pkg           Linux package readers: AppImage, snap, .deb, .rpm,
+  │                       tarballs → a file tree (pure Rust, builds on wasm)
   ├─ crates/vfs           std::fs on the desktop, an in-memory tree in the
   │                       browser — plus the ambient Platform the analysis
   │                       crates read to pick a layout
@@ -357,8 +395,20 @@ stack — with one click through to the OS update settings.
 - **Platform maturity varies.** macOS is the most-tested path.
   On Linux, apps that share a system Electron runtime
   (`/usr/lib/electronNN/electron`) are detected via that runtime, so per-app
-  ASAR/resource signals can be missed; flatpak apps invoked via `flatpak run`
-  don't yet resolve to a unique per-app binary.
+  ASAR/resource signals can be missed.
+- **An app with no native binary reports no executable.** Apps written in GJS
+  or Python (GNOME Characters, and much of the GNOME suite) ship only shared
+  objects; their entry point is a script running an interpreter from the
+  *runtime*, which is not part of the app. Those are listed and rooted at their
+  own payload, but detection has no binary to scan and reports `unknown`.
+- **Expanding AppImages costs disk.** Each one is unpacked into
+  `~/.cache/achilles/packages/` and kept, so a scan of several large Electron
+  AppImages can leave a few GB there. Nothing prunes it yet; deleting the
+  directory is safe and only costs a re-expansion on the next scan.
+- **A package upload is capped at 2 GB expanded.** Packages are compressed, so
+  a small upload can expand to an arbitrary tree; the browser refuses past that
+  ceiling rather than running the tab out of memory. LZO-compressed squashfs
+  (rare, but some snaps use it) is reported as unsupported rather than read.
 - **NVD rate limits.** Without an API key, NVD allows ~5 requests per 30
   seconds. The on-disk cache (24h TTL) turns most queries into cache hits,
   but the *first* scan of a diverse app set will pause
@@ -399,6 +449,19 @@ works.
 ```sh
 export ACHILLES_TESTAPP_BUNDLE=/Applications/Signal.app
 cargo test --workspace
+```
+
+The package readers in `crates/pkg` are tested twice over: unit tests build
+each container by hand to pin the field offsets, and
+`crates/pkg/tests/real_packages.rs` packs a known tree with the *real* tools
+(`mksquashfs` in every compression it supports, `tar`, `ar`) and asserts it
+round-trips byte-for-byte. Those tests skip cleanly when the tools aren't
+installed. `crates/detect/tests/portable.rs` goes end to end: it builds an
+Electron app, seals it in an AppImage, and asserts the framework and its
+runtime versions come back out.
+
+```sh
+cargo run -p pkg --example unpack -- ~/Downloads/Foo.AppImage
 ```
 
 ## Non-goals

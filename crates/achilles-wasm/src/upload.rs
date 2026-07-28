@@ -112,6 +112,36 @@ pub fn find_app(base: &Path, platform: Platform) -> Option<DiscoveredApp> {
     }
 }
 
+/// Locate the application inside an unpacked Linux package.
+///
+/// [`find_app`]'s rule — the shallowest directory holding an executable — is
+/// right for a zip of an app folder, where the app's own binary sits at the top
+/// and everything below it is a helper. A package payload is the opposite
+/// shape, so it needs the other rule; [`detect::payload_executable`] is that
+/// rule, shared with the desktop build, which applies it to an AppImage it
+/// expanded to disk.
+pub fn find_app_in_payload(base: &Path) -> Option<DiscoveredApp> {
+    let executable = detect::payload_executable(base)?;
+    let root = executable
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| base.to_path_buf());
+    // The package's own `.desktop` entry, then the binary's name. *Not* the
+    // containing directory, which is the natural-looking choice and the wrong
+    // one: a packaged binary lives in `usr/bin`, so that names every app "bin".
+    let name = detect::payload_name(base).or_else(|| {
+        executable
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+    });
+    Some(DiscoveredApp {
+        path: executable.clone(),
+        name,
+        root,
+        executable: Some(executable),
+    })
+}
+
 /// A single uploaded binary (a bare `.exe` or ELF, no surrounding tree). There
 /// are no sibling files to probe, so detection rests entirely on what the
 /// binary itself carries: its import table and embedded version strings.

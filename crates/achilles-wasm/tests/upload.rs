@@ -7,7 +7,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use achilles_wasm::upload::{find_app, locate_scan_target, sniff_platform};
+use achilles_wasm::upload::{find_app, find_app_in_payload, locate_scan_target, sniff_platform};
 use vfs::Platform;
 
 fn tempdir(name: &str) -> PathBuf {
@@ -273,5 +273,169 @@ fn locates_an_unpacked_app_directory() {
         locate_scan_target(&root, Platform::Linux),
         Some(root.join("resources/app"))
     );
+    fs::remove_dir_all(&base).ok();
+}
+
+// ---- locating the app inside an unpacked package -----------------------
+
+/// A distro package reproduces a slice of the filesystem, so the *shallowest*
+/// executable is the `usr/bin` launcher and the application is somewhere below
+/// it. Size is what tells them apart.
+#[test]
+fn payload_search_prefers_the_application_over_the_usr_bin_launcher() {
+    let base = tempdir("payload-optdir");
+    write(&base.join("usr/bin/foo"), &elf(2048));
+    write(&base.join("opt/Foo/foo"), &elf(200_000));
+    write(&base.join("opt/Foo/libffmpeg.so"), &elf(400_000));
+    write(&base.join("usr/share/applications/foo.desktop"), b"[Desktop Entry]");
+
+    let app = find_app_in_payload(&base).expect("app should be found");
+    assert_eq!(app.root, base.join("opt/Foo"));
+    assert_eq!(
+        app.executable.as_deref(),
+        Some(base.join("opt/Foo/foo").as_path())
+    );
+    fs::remove_dir_all(&base).ok();
+}
+
+/// Distro packages alias one binary under several names — `usr/bin/foo`, the
+/// `.build-id` entries. Following those would root the app in whichever
+/// directory happened to hold an alias.
+#[cfg(unix)]
+#[test]
+fn payload_search_ignores_symlinked_aliases_of_the_binary() {
+    let base = tempdir("payload-symlink");
+    write(&base.join("usr/lib/foo/foo"), &elf(200_000));
+    fs::create_dir_all(base.join("usr/lib/.build-id/ab")).unwrap();
+    std::os::unix::fs::symlink(
+        base.join("usr/lib/foo/foo"),
+        base.join("usr/lib/.build-id/ab/cdef"),
+    )
+    .unwrap();
+    fs::create_dir_all(base.join("usr/bin")).unwrap();
+    std::os::unix::fs::symlink(base.join("usr/lib/foo/foo"), base.join("usr/bin/foo")).unwrap();
+
+    let app = find_app_in_payload(&base).expect("app should be found");
+    assert_eq!(app.root, base.join("usr/lib/foo"));
+    fs::remove_dir_all(&base).ok();
+}
+
+/// An AppImage's squashfs root holds the app directly, next to `AppRun` and the
+/// desktop entry — the payload search has to handle that shape too.
+#[test]
+fn payload_search_handles_an_appimage_root() {
+    let base = tempdir("payload-appimage");
+    write(&base.join("AppRun"), b"#!/bin/sh\nexec ./myapp\n");
+    write(&base.join("myapp"), &elf(300_000));
+    write(&base.join("myapp.desktop"), b"[Desktop Entry]");
+    write(&base.join("resources/app.asar"), b"asar");
+    write(&base.join("chrome-sandbox"), &elf(500_000));
+
+    let app = find_app_in_payload(&base).expect("app should be found");
+    assert_eq!(app.root, base);
+    assert_eq!(
+        app.executable.as_deref(),
+        Some(base.join("myapp").as_path())
+    );
+    fs::remove_dir_all(&base).ok();
+}
+
+#[test]
+fn a_payload_with_no_executable_reports_nothing() {
+    let base = tempdir("payload-empty");
+    write(&base.join("usr/share/doc/foo/README"), b"docs only");
+
+    assert!(find_app_in_payload(&base).is_none());
+    fs::remove_dir_all(&base).ok();
+}
+
+/// End to end: unpack a package to a real directory with `pkg`, then run the
+/// same app-finding the browser runs against its in-memory tree.
+#[test]
+fn unpacking_a_package_leaves_a_tree_the_app_search_can_read() {
+    let base = tempdir("payload-unpack");
+    let payload = base.join("payload");
+
+    // A tar holding the layout a `.deb` installs.
+    let mut archive = Vec::new();
+    let mut member = |name: &str, typeflag: u8, body: &[u8]| {
+        let mut header = vec![0u8; 512];
+        header[..name.len()].copy_from_slice(name.as_bytes());
+        header[100..108].copy_from_slice(b"0000755\0");
+        header[124..136].copy_from_slice(format!("{:011o}\0", body.len()).as_bytes());
+        header[156] = typeflag;
+        header[257..263].copy_from_slice(b"ustar\0");
+        archive.extend_from_slice(&header);
+        archive.extend_from_slice(body);
+        archive.extend(std::iter::repeat(0).take((512 - body.len() % 512) % 512));
+    };
+    member("./usr/bin/foo", b'0', &elf(1024));
+    member("./opt/Foo/foo", b'0', &elf(120_000));
+    member("./opt/Foo/resources/app.asar", b'0', b"asar-bytes");
+    archive.extend(std::iter::repeat(0).take(1024));
+
+    assert_eq!(
+        pkg::sniff(&archive, "foo.tar"),
+        Some(pkg::Format::Tarball),
+        "an uncompressed tar should be recognised"
+    );
+    let mut sink = pkg::DirSink::new(&payload).unwrap();
+    let summary = pkg::unpack(&archive, pkg::Format::Tarball, &payload, &mut sink).unwrap();
+    sink.finish().unwrap();
+    assert_eq!(summary.files, 3);
+
+    let app = find_app_in_payload(&payload).expect("app should be found");
+    assert_eq!(app.root, payload.join("opt/Foo"));
+    assert_eq!(
+        locate_scan_target(&app.root, Platform::Linux).as_deref(),
+        Some(payload.join("opt/Foo/resources/app.asar").as_path()),
+        "the static scan should find the asar beside the binary"
+    );
+    fs::remove_dir_all(&base).ok();
+}
+
+/// The app is named by the package's own `.desktop` entry. Naming it after the
+/// containing directory instead calls every packaged app "bin", since that is
+/// where a packaged binary lives.
+#[test]
+fn payload_app_is_named_by_its_desktop_entry_not_its_directory() {
+    let base = tempdir("payload-name");
+    write(&base.join("usr/bin/achilles"), &elf(200_000));
+    write(
+        &base.join("usr/share/applications/Achilles.desktop"),
+        b"[Desktop Entry]\nType=Application\nName=Achilles\nExec=achilles\n\n\
+          [Desktop Action new]\nName=New Window\n",
+    );
+
+    let app = find_app_in_payload(&base).expect("app should be found");
+    assert_eq!(app.root, base.join("usr/bin"));
+    assert_eq!(app.name.as_deref(), Some("Achilles"));
+    fs::remove_dir_all(&base).ok();
+}
+
+/// An AppImage keeps its entry at the payload root.
+#[test]
+fn an_appimage_desktop_entry_at_the_root_names_the_app() {
+    let base = tempdir("payload-name-appimage");
+    write(&base.join("AppRun"), b"#!/bin/sh\nexec ./usr/bin/app\n");
+    write(&base.join("usr/bin/app"), &elf(200_000));
+    write(
+        &base.join("MyApp.desktop"),
+        b"[Desktop Entry]\nName=My App\nExec=AppRun\n",
+    );
+
+    let app = find_app_in_payload(&base).expect("app should be found");
+    assert_eq!(app.name.as_deref(), Some("My App"));
+    fs::remove_dir_all(&base).ok();
+}
+
+/// With no entry to read, the binary's own name beats the directory's.
+#[test]
+fn a_payload_without_a_desktop_entry_falls_back_to_the_binary_name() {
+    let base = tempdir("payload-name-none");
+    write(&base.join("usr/bin/hello"), &elf(200_000));
+
+    let app = find_app_in_payload(&base).expect("app should be found");
+    assert_eq!(app.name.as_deref(), Some("hello"));
     fs::remove_dir_all(&base).ok();
 }

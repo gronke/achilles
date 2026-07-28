@@ -1,0 +1,26 @@
+[package]
+name = "pkg"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Read Linux application package formats (AppImage, snap, .deb, .rpm, tarballs) into a file tree"
+
+# Every reader and every decompressor here is pure Rust: this crate is compiled
+# into the wasm bundle, where a C backend (liblzma, libzstd, minizip) has no
+# libc to link against. That rules out the usual crates (`backhand`, `zstd`,
+# `xz2`) and is why the container formats are parsed here directly.
+[dependencies]
+flate2.workspace = true
+lzma-rs.workspace = true
+ruzstd.workspace = true
+bzip2-rs.workspace = true
+lz4_flex.workspace = true
+thiserror.workspace = true
+
+# Locating the cache an expanded package is kept in. Native only: the browser
+# build holds the unpacked tree in memory and never writes it anywhere.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+dirs.workspace = true

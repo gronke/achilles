@@ -33,3 +33,11 @@ cve.workspace = true
 # which `workspace = true` would silently ignore.
 app-audit = { path = "../app-audit", default-features = false }
 zip.workspace = true
+# Linux package formats (AppImage, snap, .deb, .rpm, tarballs). Pure Rust all
+# the way down, so it links here as readily as it does on the desktop.
+pkg.workspace = true
+
+[dev-dependencies]
+# The native tests unpack real packages to a temp directory and then run the
+# same app-finding code the browser runs against the in-memory tree.
+pkg.workspace = true
