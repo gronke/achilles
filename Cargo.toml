@@ -75,6 +75,10 @@ lz4_flex = { version = "0.14", default-features = false, features = [
     "frame",
 ] }
 bzip2-rs = "0.1"
+# CVSS parsing + scoring (v2/v3/v4) for advisory vectors. Git-pinned: the v2
+# scoring fixes (rustsec/rustsec#1662, #1664) are merged upstream but 3.0.0 is
+# not on crates.io yet; switch to the release once it ships.
+cvss = { git = "https://github.com/rustsec/rustsec.git", rev = "3889e79597f5a8f42b6b8c2fe2db521d0f255991" }
 # data-parallelism for the static-scan corpus loop
 rayon = "1.10"
 # wasm / browser entry point (the `achilles-wasm` crate); pinned centrally so

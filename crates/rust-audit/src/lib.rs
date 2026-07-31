@@ -15,6 +15,7 @@ pub use extract::{extract, AuditedCrate};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use cvss::Cvss;
 use memmap2::Mmap;
 use serde::Serialize;
 
@@ -37,6 +38,10 @@ pub struct RustFinding {
     pub title: String,
     pub aliases: Vec<String>,
     pub cvss: Option<String>,
+    /// Base score computed from `cvss` (0.0–10.0).
+    pub score: Option<f64>,
+    /// Qualitative severity for `score` ("low" … "critical").
+    pub severity: Option<String>,
     /// Non-null for informational advisories (unmaintained/unsound/notice).
     pub informational: Option<String>,
     pub patched: Vec<String>,
@@ -94,6 +99,7 @@ pub fn audit(executable: &Path, root: Option<&Path>) -> RustAuditReport {
                 .or_insert_with(|| db.advisories_for(&c.name));
             for a in advisories.iter() {
                 if a.affects(&c.version) {
+                    let (score, severity) = scored(a.cvss.as_deref());
                     report.findings.push(RustFinding {
                         binary: binary.clone(),
                         crate_name: c.name.clone(),
@@ -102,6 +108,8 @@ pub fn audit(executable: &Path, root: Option<&Path>) -> RustAuditReport {
                         title: a.title.clone(),
                         aliases: a.aliases.clone(),
                         cvss: a.cvss.clone(),
+                        score,
+                        severity,
                         informational: a.informational.clone(),
                         patched: a.patched.clone(),
                         url: a.url.clone(),
@@ -111,6 +119,16 @@ pub fn audit(executable: &Path, root: Option<&Path>) -> RustAuditReport {
         }
     }
     report
+}
+
+/// Base score and severity for an advisory's CVSS vector, any version the
+/// `cvss` crate knows (v2 vectors carry no `CVSS:` prefix).
+fn scored(vector: Option<&str>) -> (Option<f64>, Option<String>) {
+    let parsed = vector.and_then(|s| s.parse::<Cvss>().ok());
+    (
+        parsed.as_ref().map(Cvss::score),
+        parsed.map(|v| v.severity().as_str().to_string()),
+    )
 }
 
 /// Extract audit data from a file via mmap (avoids reading large binaries fully
@@ -174,4 +192,24 @@ fn is_framework_main(path: &Path, name: &str) -> bool {
     let fw = format!("{name}.framework");
     path.ancestors()
         .any(|a| a.file_name().and_then(|n| n.to_str()) == Some(fw.as_str()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scored;
+
+    #[test]
+    fn cvss_scoring() {
+        let (score, sev) = scored(Some("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"));
+        assert_eq!(score, Some(9.8));
+        assert_eq!(sev.as_deref(), Some("critical"));
+
+        // v2 vectors carry no prefix; scored with the post-#1662 rounding.
+        let (score, sev) = scored(Some("AV:N/AC:L/Au:N/C:P/I:P/A:P"));
+        assert_eq!(score, Some(7.5));
+        assert_eq!(sev.as_deref(), Some("high"));
+
+        assert_eq!(scored(Some("not a vector")), (None, None));
+        assert_eq!(scored(None), (None, None));
+    }
 }
