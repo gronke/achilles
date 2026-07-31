@@ -18,3 +18,4 @@ toml.workspace = true
 flate2.workspace = true
 auditable-extract.workspace = true
 memmap2.workspace = true
+cvss.workspace = true
