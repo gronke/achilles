@@ -1776,10 +1776,11 @@ function renderRustReport(r) {
   const items = findings
     .map(
       (f) =>
-        `<div class="advisory ${f.informational ? "" : "bad"}">
+        `<div class="advisory ${f.severity ? escapeHtml(f.severity) : f.informational ? "" : "bad"}">
           <strong>${escapeHtml(f.id)}</strong>
           <code>${escapeHtml(f.crateName)} ${escapeHtml(f.version)}</code>
           ${f.informational ? `<span class="muted">[${escapeHtml(f.informational)}]</span>` : ""}
+          ${f.severity ? `<span class="${escapeHtml(f.severity)}">[${escapeHtml(f.severity)}${f.score != null ? ` ${f.score.toFixed(1)}` : ""}]</span>` : ""}
           ${f.cvss ? `<span class="muted">${escapeHtml(f.cvss)}</span>` : ""}
           ${f.aliases?.length ? `<span class="muted">${escapeHtml(f.aliases.join(", "))}</span>` : ""}
           <br>${escapeHtml(f.title)}
