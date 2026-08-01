@@ -14,7 +14,7 @@ name: Refresh EUVD snapshot
 
 on:
   schedule:
-    - cron: "17 * * * *" # hourly, off the top of the hour
+    - cron: "0 0 * * *" # daily at midnight, off the top of the hour
   workflow_dispatch:
 
 # Least privilege: this only dispatches the deploy workflow. It never writes
