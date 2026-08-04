@@ -42,7 +42,7 @@ jobs:
 
       # Verified prebuilt web-modules binary on PATH — cargo tauri build's
       # beforeBuildCommand runs scripts/frontend-build.sh, which needs it.
-      - uses: gronke/web_modules@v0
+      - uses: gronke/web_modules@v0.6.0
         with:
           build: "false"
 

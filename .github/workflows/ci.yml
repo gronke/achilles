@@ -34,7 +34,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       # Verified prebuilt web-modules binary on PATH; the build scripts drive it.
-      - uses: gronke/web_modules@v0
+      - uses: gronke/web_modules@v0.6.0
         with:
           build: "false"
       - run: rustup target add wasm32-unknown-unknown
